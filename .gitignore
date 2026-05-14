@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Entorno Virtual
+.env
+.venv
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Logs y Debugging
+logs/
+*.log
+
+# Jupyter Notebooks (ignoramos el estado, mantenemos el código)
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# Datos y Vectores (¡CRÍTICO: No subir datos de entrenamiento al repo!)
+data/raw_pdfs/
+data/chroma_db/
+data/outputs/
+data/sft/
+data/clean/
+data/datasets/
+
+# Variables de Entorno (¡NUNCA SUBIR API KEYS!)
+.env
+smoke_test.sh
+main.py
+hf_cache
+data
+test
+test.py
+ngrok
+ngrok-v3-stable-linux-amd64.tgz
+# MacOS / Windows OS files
+.DS_Store
+Thumbs.db
