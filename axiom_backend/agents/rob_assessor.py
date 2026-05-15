@@ -33,10 +33,10 @@ import logging
 
 from pydantic import BaseModel, ValidationError, Field
 
-from src.state import AxiomState
-from src.config import settings
-from src.tools.llm_router import LLM_32B, extract_json_from_response
-from src.prompts import ROB_ASSESSOR_PROMPT
+from axiom_backend.state import AxiomState
+from axiom_backend.config import settings
+from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response
+from axiom_backend.prompts import ROB_ASSESSOR_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,8 @@ logger = logging.getLogger(__name__)
 # u otro agente está corriendo en paralelo, este número debería bajarse desde
 # el grafo. Como rob_assessor es secuencial en el DAG (no comparte slot con
 # screener), 4 está OK.
-MAX_CONCURRENT_PAPERS = 4
+MAX_CONCURRENT_PAPERS = 1   # Featherless Premium: el 32B cuesta 2 units.
+                            # 2 paralelos × 2 units = 4 (cap del plan).
 
 # DeepSeek-R1 razonando un paper completo: 60-90s típico. Margen para outliers.
 TIMEOUT_S = settings.cochrane_rob_timeout_s

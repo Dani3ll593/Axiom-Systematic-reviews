@@ -19,8 +19,8 @@ from fastapi.responses import JSONResponse, StreamingResponse, FileResponse
 from pydantic import BaseModel
 
 # Importamos el grafo real y la configuración local
-from src.graph import pipeline
-from src.config import settings
+from axiom_backend.graph import pipeline
+from axiom_backend.config import settings
 
 # ─── Configuración y Constantes ───────────────────────────────────────
 RUNS_DIR = Path("data/api_runs")

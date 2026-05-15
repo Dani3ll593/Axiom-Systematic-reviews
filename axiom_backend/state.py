@@ -28,6 +28,14 @@ class AxiomState(TypedDict, total=False):
     # Outputs del Agente 2 (Screener)
     screened_papers: Annotated[list[dict], operator.add] # Include / Uncertain
     papers_excluded: Annotated[list[dict], operator.add] # Exclude (para auditoría PRISMA)
+
+    # Key intermedia screener_7b → screener_32b. Lista de papers donde el 7B
+    # disparó la regla de escalación (confidence=low o decision=uncertain),
+    # cada uno con su veredicto 7B adjunto en `_7b_decision` para que
+    # screener_32b pueda hacer fallback si el 32B falla. Escritura atómica
+    # (solo screener_7b la produce, solo screener_32b la consume) — NO usa
+    # operator.add a propósito.
+    papers_to_escalate: list[dict]
     
     # Output del Agente 3 (Extractor)
     extractions: Annotated[list[dict], operator.add]

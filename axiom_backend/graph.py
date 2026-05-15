@@ -1,77 +1,111 @@
-"""
-Configuración global de Axiom.
-Carga las variables desde el archivo .env de forma tipada y segura.
-"""
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field
+from langgraph.graph import StateGraph, START, END
+from typing import Literal
 
-class Settings(BaseSettings):
-    # ─── APIs de Búsqueda y Extracción ───
-    pubmed_api_key: str | None = None
-    openalex_api_key: str | None = None
-    # El email es obligatorio para los "polite pools". Falla si está vacío.
-    contact_email: str = Field(..., min_length=1)
+from axiom_backend.state import AxiomState
+from axiom_backend.config import settings
 
-    # ─── Featherless API (LLM Inference) ───
-    # Reemplaza vLLM/MI300X. Cliente único, OpenAI-compatible.
-    # El kill-switch llm_router.py se migra a este endpoint en el próximo paso.
-    featherless_api_key: str | None = None
-    featherless_base_url: str = "https://api.featherless.ai/v1"
-    # Cap GLOBAL de conexiones concurrentes (Premium = 4). Excederlo causa
-    # 429s en cascada. El semáforo se aplica en llm_router (post-migración).
-    featherless_max_concurrent: int = 4
+from axiom_backend.agents.searcher import run_searcher
+from axiom_backend.agents.screener import screener_7b_node, screener_32b_node
+from axiom_backend.agents.extractor import run_extractor
+from axiom_backend.tools.clusterer import clusterer_node
+from axiom_backend.agents.analyst_7b import analyst_7b_node
+from axiom_backend.agents.analyst_32b import analyst_32b_node
+from axiom_backend.tools.reconciler import reconciler_node
+from axiom_backend.agents.gap_finder import run_gap_finder
+from axiom_backend.agents.writer import run_writer
 
-    # ─── Modelos por Rol ───
-    # IDs deben coincidir con los disponibles en featherless.ai/models.
-    model_7b_name: str = "Qwen/Qwen2.5-72B-Instruct"
-    # Reasoning model (DeepSeek-R1) usado por: screener uncertain pass,
-    # analyst_32b, gap_finder, rob_assessor, grade_profiler.
-    model_32b_name: str = "deepseek-ai/DeepSeek-R1"
-    # Writer model (Kimi-K2) — narrativa larga coherente para reportes APA 7.
-    model_writer_name: str = "moonshotai/Kimi-K2-Instruct"
-    # Light reasoning (DeepSeek-V3) para analyst_7b — DEBE ser distinto a
-    # model_32b_name para que el reconciler tenga señal de desacuerdo útil.
-    model_light_reasoning_name: str = "deepseek-ai/DeepSeek-V3"
+# Cochrane nodes (solo se invocan si state["cochrane_mode"] AND settings.cochrane_mode_enabled)
+from axiom_backend.agents.rob_assessor import run_rob_assessor
+from axiom_backend.agents.grade_profiler import run_grade_profiler
 
-    # ─── Servidores Locales (vLLM en AMD MI300X) — DEPRECATED ───
-    # Mantenidos solo hasta que llm_router.py se migre a Featherless.
-    # No tocar — eliminar junto con la refactorización del router.
-    vllm_url_7b: str = "VLLM_URL_7B"
-    vllm_url_32b: str = "VLLM_URL_32B"
-    vllm_api_key: str | None = None
 
-    # ─── Modo Cochrane (Risk of Bias + GRADE) ───
-    # Kill-switch global del servidor. Si False, los nodos rob_assessor y
-    # grade_profiler se SALTAN aunque state["cochrane_mode"] sea True.
-    # Útil para desactivar Cochrane sin tocar código cuando Featherless está
-    # rate-limitado o los modelos de reasoning están lentos.
-    cochrane_mode_enabled: bool = True
+# ==============================================================================
+# LÓGICA DE CONDICIONES (Ruteo Dinámico)
+# ==============================================================================
+def check_screening_results(state: AxiomState) -> Literal["extractor", "writer"]:
+    """Si el screener rechaza TODOS los papers, saltamos directo al writer para informar."""
+    if not state.get("screened_papers"):
+        return "writer"
+    return "extractor"
 
-    # ─── Rutas del Sistema ───
-    chroma_persist_dir: str = "./data/chroma_db"
 
- # ─── Clusterer (BGE-M3 + AgglomerativeClustering) ───
-    # Métrica coseno: threshold=distancia, NO similitud.
-    #   0.30-0.40 → near-duplicates (muy estricto, muchos singletons)
-    #   0.50      → mismo subtopic (default sensato para BGE-M3)
-    #   0.60-0.70 → mismo dominio general (laxo, clusters grandes)
-    cluster_distance_threshold: float = 0.7
+def _should_run_cochrane(state: AxiomState) -> bool:
+    """True si el usuario pidió Cochrane Y el kill-switch global lo permite.
 
-    # Cota dura sobre el JSON serializado del cluster que se manda al analyst.
-    # Con Featherless Premium (32K context) podemos subir vs el cap original
-    # de 16K que asumía vLLM con ctx=8192. Margen: system prompt (~1400) +
-    # max_tokens (4096) + buffer (~500) ≈ 6K, deja ~26K para user msg.
-    analyst_max_user_chars: int = 28000
+    El kill-switch (settings.cochrane_mode_enabled) le da al sysadmin una
+    forma de desactivar Cochrane sin tocar código — útil si Featherless está
+    rate-limiteado o los modelos de reasoning están lentos.
+    """
+    return bool(state.get("cochrane_mode", False)) and settings.cochrane_mode_enabled
 
-    # ─── UI y Streamlit ───
-    streamlit_server_port: int = 8501
 
-    # Permite ignorar variables extra en el .env que no usemos aquí
-    model_config = SettingsConfigDict(
-        env_file=".env", 
-        env_file_encoding="utf-8", 
-        extra="ignore"
-    )
+def route_after_extractor(state: AxiomState) -> Literal["rob_assessor", "clusterer"]:
+    """Modo Cochrane → rob_assessor antes del clusterer. Modo fast → directo al clusterer."""
+    return "rob_assessor" if _should_run_cochrane(state) else "clusterer"
 
-# Instancia global (singleton) para importar desde otros módulos
-settings = Settings()
+
+def route_after_reconciler(state: AxiomState) -> Literal["grade_profiler", "gapfinder"]:
+    """Modo Cochrane → grade_profiler antes del gap finder. Modo fast → directo al gap finder."""
+    return "grade_profiler" if _should_run_cochrane(state) else "gapfinder"
+
+
+# ==============================================================================
+# CONSTRUCCIÓN DEL GRAFO
+# ==============================================================================
+def build_axiom_graph():
+    builder = StateGraph(AxiomState)
+
+    # 1. Agregar Nodos
+    builder.add_node("searcher", run_searcher)
+    builder.add_node("screener_7b", screener_7b_node)
+    builder.add_node("screener_32b", screener_32b_node)
+    builder.add_node("extractor", run_extractor)
+    builder.add_node("rob_assessor", run_rob_assessor)        # Cochrane only
+    builder.add_node("clusterer", clusterer_node)
+    builder.add_node("analyst_7b", analyst_7b_node)
+    builder.add_node("analyst_32b", analyst_32b_node)
+    builder.add_node("reconciler", reconciler_node)
+    builder.add_node("grade_profiler", run_grade_profiler)    # Cochrane only
+    builder.add_node("gapfinder", run_gap_finder)
+    builder.add_node("writer", run_writer)
+
+    # 2. Definir Aristas (Flujo)
+    builder.add_edge(START, "searcher")
+    builder.add_edge("searcher", "screener_7b")
+    # Cascada de screening: el 32B procesa solo los papers que el 7B marcó
+    # como uncertain/low confidence (vía `papers_to_escalate` en el state).
+    # Si no hay nada que escalar, screener_32b retorna {} sin overhead.
+    builder.add_edge("screener_7b", "screener_32b")
+
+    # Condicional post-screening (Salta al final si no hay papers).
+    # Se evalúa después de screener_32b porque `screened_papers` acumula
+    # contribuciones de ambos nodos vía operator.add.
+    builder.add_conditional_edges("screener_32b", check_screening_results)
+
+    # Condicional post-extractor: si modo Cochrane, evaluar Risk of Bias antes
+    # del clusterer. Si no, ir directo. El clusterer no depende de rob_assessments,
+    # así que rob_assessor puede ejecutarse en serie sin afectar otros nodos.
+    builder.add_conditional_edges("extractor", route_after_extractor)
+    builder.add_edge("rob_assessor", "clusterer")
+
+    # Fan-out: El clusterer alimenta en paralelo a ambos analistas
+    builder.add_edge("clusterer", "analyst_7b")
+    builder.add_edge("clusterer", "analyst_32b")
+
+    # FAN-IN: El reconciliador necesita que AMBOS analistas terminen
+    builder.add_edge("analyst_7b", "reconciler")
+    builder.add_edge("analyst_32b", "reconciler")
+
+    # Condicional post-reconciler: si modo Cochrane, aplicar GRADE a cada
+    # consensus cluster antes del gap finder. Si no, ir directo.
+    builder.add_conditional_edges("reconciler", route_after_reconciler)
+    builder.add_edge("grade_profiler", "gapfinder")
+
+    builder.add_edge("gapfinder", "writer")
+    builder.add_edge("writer", END)
+
+    return builder.compile()
+
+# Exportamos el pipeline compilado para que axiom_api.py y otros lo importen.
+# Sin esta línea, `from axiom_backend.graph import pipeline` falla.
+pipeline = build_axiom_graph()

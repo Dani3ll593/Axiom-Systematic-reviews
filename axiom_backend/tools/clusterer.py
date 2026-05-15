@@ -10,8 +10,8 @@ import chromadb
 from FlagEmbedding import BGEM3FlagModel
 from sklearn.cluster import AgglomerativeClustering
 
-from src.state import AxiomState
-from src.config import settings
+from axiom_backend.state import AxiomState
+from axiom_backend.config import settings
 
 logger = logging.getLogger(__name__)
 

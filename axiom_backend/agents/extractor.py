@@ -21,15 +21,16 @@ import instructor
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError, field_validator
 
-from src.config import settings
-from src.prompts import EXTRACTION_PROMPT
-from src.state import AxiomState
-from src.tools.pdf_parser import parse_pdf
+from axiom_backend.config import settings
+from axiom_backend.prompts import EXTRACTION_PROMPT
+from axiom_backend.state import AxiomState
+from axiom_backend.tools.pdf_parser import parse_pdf
+from axiom_backend.tools.llm_router import LLM_FEATHERLESS, FEATHERLESS_SEMAPHORE
 
 logger = logging.getLogger(__name__)
 
 # --- Tunables ---
-MAX_CONCURRENT = 16
+MAX_CONCURRENT = 1   # Featherless Premium: 4 units totales con Qwen-7B (cost 1).
 LLM_TIMEOUT_S = 45.0
 MAX_INPUT_CHARS = 8000  # Truncation limit to prevent 7B context overflow
 
@@ -98,12 +99,10 @@ class PaperExtraction(BaseModel):
 _clients: dict = {}
 
 def _get_client(base_url: str):
+    """Cliente instructor envolviendo Featherless. Ver screener._get_client."""
     if base_url not in _clients:
         _clients[base_url] = instructor.from_openai(
-            AsyncOpenAI(
-                base_url=base_url,
-                api_key=settings.vllm_api_key or "EMPTY",
-            ),
+            LLM_FEATHERLESS,
             mode=instructor.Mode.JSON,
         )
     return _clients[base_url]
@@ -177,21 +176,26 @@ async def _extract_one(
     text_to_process = raw_text[:MAX_INPUT_CHARS]
 
     try:
-        return await asyncio.wait_for(
-            client.chat.completions.create(
-                model=model,
-                response_model=PaperExtraction,
-                messages=[
-                    {"role": "system", "content": EXTRACTION_PROMPT},
-                    {"role": "user",   "content": f"Paper text:\n{text_to_process}"},
-                ],
-                max_retries=3,
-                presence_penalty=0.0,
-                frequency_penalty=0.0,
-                temperature=0.0,
-            ),
-            timeout=LLM_TIMEOUT_S,
-        )
+        # Semáforo global de Featherless: el extractor procesa hasta
+        # MAX_CONCURRENT=4 papers en paralelo, pero todos comparten el cap
+        # de 4 units (Qwen-7B cost=1). Este lock fuerza que ninguna llamada
+        # extra (de otro agente paralelo) cause overflow del plan.
+        async with FEATHERLESS_SEMAPHORE:
+            return await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=model,
+                    response_model=PaperExtraction,
+                    messages=[
+                        {"role": "system", "content": EXTRACTION_PROMPT},
+                        {"role": "user",   "content": f"Paper text:\n{text_to_process}"},
+                    ],
+                    max_retries=3,
+                    presence_penalty=0.0,
+                    frequency_penalty=0.0,
+                    temperature=0.0,
+                ),
+                timeout=LLM_TIMEOUT_S,
+            )
 
         if extraction:
             extraction.title = extraction.title or paper.get("title")
@@ -248,7 +252,7 @@ async def run_extractor(state: AxiomState) -> dict:
             return await _extract_one(
                 paper=p, 
                 model=settings.model_7b_name, 
-                base_url=settings.vllm_url_7b
+                base_url="FEATHERLESS_7B"
             )
 
     results = await asyncio.gather(

@@ -39,14 +39,25 @@ import instructor
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 
-from src.config import settings
-from src.prompts import SCREENER_PROMPT, SCREENER_FEWSHOT
-from src.state import AxiomState
+from axiom_backend.config import settings
+from axiom_backend.prompts import (
+    SCREENER_PROMPT_7B,
+    SCREENER_FEWSHOT_7B,
+    SCREENER_PROMPT_32B,
+    SCREENER_FEWSHOT_32B,
+)
+from axiom_backend.state import AxiomState
+from axiom_backend.tools.llm_router import LLM_FEATHERLESS, FEATHERLESS_SEMAPHORE
 
 logger = logging.getLogger(__name__)
 
 # --- Tunables ---
-MAX_CONCURRENT = 16  # Capped to prevent vLLM OOM on MI300X
+# Mantengo concurrencia=1 en ambos nodos porque subir MAX_CONCURRENT a 4
+# en la versión monolítica disparaba 429s desde Featherless (probablemente
+# por competencia con otros nodos del grafo). Cambiar estos valores requiere
+# medir el budget global de units, no solo el del screener.
+MAX_CONCURRENT_7B = 1
+MAX_CONCURRENT_32B = 1
 LLM_TIMEOUT_S = 30.0
 ESCALATE_CONFIDENCES = {"low"}
 ESCALATE_DECISIONS = {"uncertain"}
@@ -72,12 +83,16 @@ class ScreenerDecision(BaseModel):
 _clients: dict = {}
 
 def _get_client(base_url: str) -> instructor.AsyncInstructor:
+    """Devuelve un cliente instructor envolviendo Featherless.
+
+    El argumento `base_url` queda como cache key para no romper la firma —
+    en la práctica siempre apunta a Featherless. Los callers que pasan
+    settings.vllm_url_7b / vllm_url_32b ahora pasan strings dummy
+    ('FEATHERLESS_7B', 'FEATHERLESS_32B') que solo discriminan en cache.
+    """
     if base_url not in _clients:
         _clients[base_url] = instructor.from_openai(
-            AsyncOpenAI(
-                base_url=base_url,
-                api_key=settings.vllm_api_key or "EMPTY",
-            ),
+            LLM_FEATHERLESS,
             mode=instructor.Mode.JSON,
         )
     return _clients[base_url]
@@ -157,59 +172,81 @@ async def _screen_one(
     prisma_json: str,
     model: str,
     base_url: str,
+    prior_decision: dict | None = None,
 ) -> ScreenerDecision | None:
-    """Ejecuta una llamada LLM con validación Pydantic estructurada."""
+    """Ejecuta una llamada LLM con validación Pydantic estructurada.
+
+    Selecciona el prompt y el fewshot según el modelo:
+      - 7B → SCREENER_PROMPT_7B + SCREENER_FEWSHOT_7B (rol: first reviewer).
+      - 32B → SCREENER_PROMPT_32B + SCREENER_FEWSHOT_32B (rol: adjudicator
+              que recibe `prior_decision` en el user message para enfocar
+              su reasoning en lo que el 7B no pudo resolver).
+    """
     client = _get_client(base_url)
-    
-    # str.replace preserves actual JSON brackets within the prompt
-    system_prompt = SCREENER_PROMPT.replace("{prisma_criteria_json}", prisma_json)
-    user_msg = f"ABSTRACT:\n{paper.get('abstract', '')}"
+
+    is_32b = (model == settings.model_32b_name)
+
+    # str.replace preserves actual JSON brackets within the prompt.
+    if is_32b:
+        system_prompt = SCREENER_PROMPT_32B.replace("{prisma_criteria_json}", prisma_json)
+        fewshot       = SCREENER_FEWSHOT_32B
+    else:
+        system_prompt = SCREENER_PROMPT_7B.replace("{prisma_criteria_json}", prisma_json)
+        fewshot       = SCREENER_FEWSHOT_7B
+
+    # Para el 32B, anteponemos el veredicto del 7B al abstract en el user
+    # message para que el modelo lo razone explícitamente. Para el 7B no
+    # hay prior_decision (es el primer reviewer).
+    abstract = paper.get("abstract", "")
+    if is_32b and prior_decision:
+        user_msg = (
+            f"PRIOR REVIEWER VERDICT (from 7B model):\n"
+            f"{json.dumps(prior_decision, ensure_ascii=False, indent=2)}\n\n"
+            f"ABSTRACT:\n{abstract}"
+        )
+    else:
+        user_msg = f"ABSTRACT:\n{abstract}"
 
     try:
         mensajes = [
             {"role": "system", "content": system_prompt},
-            {"role": "system", "content": f"Examples:\n{SCREENER_FEWSHOT}"},
+            {"role": "system", "content": f"Examples:\n{fewshot}"},
             {"role": "user",   "content": user_msg},
         ]
-        
-        # --- PARCHE PARA QWQ-32B ---
-        if model == settings.model_32b_name:
-            try:
-                # 1. Le volvemos a dar las instrucciones manuales del JSON
-                esquema_json = """
-IMPORTANT: You are an expert data extractor. You can reason and think freely, but your FINAL output must be a valid JSON object wrapped EXACTLY inside <json> and </json> tags. Do NOT use single quotes for keys.
 
-Example format:
-<json>
-{
-  "justification": "Explanation of your reasoning",
-  "criteria_met": {
-    "population": true,
-    "intervention": false,
-    "outcomes": null,
-    "study_design": false,
-    "temporal": true,
-    "language": true
-  },
-  "confidence": "high",
-  "reason": "wrong_study_design",
-  "decision": "exclude"
-}
-</json>
-"""
-                mensajes_32b = mensajes + [{"role": "system", "content": esquema_json}]
-                
-                raw_client = AsyncOpenAI(base_url=base_url, api_key=settings.vllm_api_key or "EMPTY")
-                respuesta_cruda = await asyncio.wait_for(
-                    raw_client.chat.completions.create(
-                        model=model,
-                        messages=mensajes_32b,
-                        temperature=0.3,
-                        max_tokens=4096,
-                        # Quitamos extra_body porque vLLM lo está ignorando
-                    ),
-                    timeout=600.0,
-                )
+        # --- RAMA QWQ-32B: cliente raw + parser <json> ---
+        # NOTA: el formato <json>...</json> ahora está dentro del prompt 32B,
+        # no se inyecta aquí. Esto elimina el `esquema_json` que antes vivía
+        # en runtime y duplicaba lo que ya estaba en el prompt.
+        if is_32b:
+            try:
+
+                # Pre-binding: declaramos `texto` antes del try interno para que el
+                # except pueda referenciarlo aunque la excepción ocurra durante la
+                # llamada HTTP (antes de que `texto` se asigne). Sin esto, el log
+                # del except crashearía con UnboundLocalError cuando el fallo es
+                # 429/timeout HTTP.
+                texto: str | None = None
+
+                # Reutilizamos el cliente Featherless global en vez de crear uno nuevo —
+                # antes esto creaba un AsyncOpenAI por llamada al 32B, lo cual
+                # malgastaba conexiones del pool y se saltaba el semáforo global.
+                raw_client = LLM_FEATHERLESS
+                # Semáforo global: el 32B cuesta 2 units, así que con cap=4
+                # solo 2 papers pueden estar en flight simultáneo en el screener
+                # uncertain pass. Sin esto, los 4 papers paralelos del fan-out
+                # del 7B dispararían retries en cascada al escalar al 32B.
+                async with FEATHERLESS_SEMAPHORE:
+                    respuesta_cruda = await asyncio.wait_for(
+                        raw_client.chat.completions.create(
+                            model=model,
+                            messages=mensajes,
+                            temperature=0.3,
+                            max_tokens=4096,
+                            # Quitamos extra_body porque vLLM lo está ignorando
+                        ),
+                        timeout=600.0,
+                    )
                 
                 texto = respuesta_cruda.choices[0].message.content
                 
@@ -225,25 +262,56 @@ Example format:
                     raise ValueError("No se pudo extraer JSON válido del texto libre.")
                     
             except Exception as e:
-                # Falla en silencio y deja que el 7B tome el control
+                # DIAGNOSTIC: antes de fallar al 7B, logueamos QUÉ falló.
+                # Esto reemplaza el silencio anterior — sin esto era imposible
+                # diferenciar parse error vs timeout vs 429 vs validation.
+                #
+                # Nivel 1: tipo + mensaje (siempre disponible)
+                logger.error(
+                    "screener: 32b inner exception: %s - %s",
+                    type(e).__name__, str(e)[:300],
+                    extra={
+                        "paper_id": paper.get("paper_id"),
+                        "model": model,
+                        "node": "screener",
+                    },
+                )
+                # Nivel 2: preview del output crudo (solo si llegamos a obtenerlo).
+                # 500 chars suelen ser suficientes para ver si el modelo respetó
+                # las tags <json> o devolvió algo inesperado.
+                if texto:
+                    preview = texto[:500].replace("\n", " ")
+                    logger.error(
+                        "screener: 32b raw output preview (500 chars): %r",
+                        preview,
+                        extra={
+                            "paper_id": paper.get("paper_id"),
+                            "node": "screener",
+                        },
+                    )
+                # Comportamiento intacto: re-raise para caer al fallback del 7B.
                 raise ValueError("Fallo en 32B")
 
 
         # --- COMPORTAMIENTO NORMAL PARA QWEN 7B ---
         else:
-            return await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=model,
-                    response_model=ScreenerDecision,
-                    messages=mensajes,
-                    max_retries=3,
-                    presence_penalty=0.0,
-                    frequency_penalty=0.0,
-                    temperature=0.3,
-                    max_tokens=1024,
-                ),
-                timeout=LLM_TIMEOUT_S,
-            )
+            # Semáforo global: el 7B cuesta 1 unit, hasta 4 papers paralelos.
+            # MAX_CONCURRENT local también es 4, así que el cuello de botella
+            # es Featherless. Este lock previene los 429 que veíamos en run 2.
+            async with FEATHERLESS_SEMAPHORE:
+                return await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model,
+                        response_model=ScreenerDecision,
+                        messages=mensajes,
+                        max_retries=3,
+                        presence_penalty=0.0,
+                        frequency_penalty=0.0,
+                        temperature=0.3,
+                        max_tokens=1024,
+                    ),
+                    timeout=LLM_TIMEOUT_S,
+                )
 
     except (ValidationError, json.JSONDecodeError, asyncio.TimeoutError, ValueError):
         return None
@@ -257,62 +325,42 @@ Example format:
 def _should_escalate(d: ScreenerDecision) -> bool:
     return d.confidence in ESCALATE_CONFIDENCES or d.decision in ESCALATE_DECISIONS
 
-async def _cascade_screen(
-    paper: dict,
-    prisma_json: str,
-) -> tuple[ScreenerDecision | None, str]:
-    """7B → 32B en cascada."""
-    if not (paper.get("abstract") or "").strip():
-        return _empty_abstract_decision(), "skip_no_abstract"
 
-    # Fase 1: Qwen 7B Fast Pass
-    first = await _screen_one(
-        paper, prisma_json, settings.model_7b_name, settings.vllm_url_7b,
-    )
-    if first is None:
-        return None, "failed"
+# --- LangGraph Nodes ---
+async def screener_7b_node(state: AxiomState) -> dict:
+    """Fase 1 del screening: corre Qwen 7B sobre todos los papers.
 
-    if not _should_escalate(first):
-        return first, "7b"
+    Ramifica en tres outputs:
+      - `screened_papers`  ← decisiones 7B definitivas (no requieren escalación)
+                             incluye papers sin abstract (route="skip_no_abstract").
+      - `papers_excluded`  ← exclusiones 7B definitivas (high/medium confidence).
+      - `papers_to_escalate` ← papers con confidence=low o decision=uncertain.
+                               Cada uno con su `_7b_decision` adjunta para
+                               que screener_32b pueda hacer fallback si el
+                               32B falla.
 
-    # Fase 2: QwQ-32B Reasoning Fallback
-    second = await _screen_one(
-        paper, prisma_json, settings.model_32b_name, settings.vllm_url_32b,
-    )
-    if second is None:
-        logger.warning(
-            "screener: 32b failed, keeping 7b veredict",
-            extra={"paper_id": paper.get("paper_id"), "node": "screener"},
-        )
-        return first, "7b_fallback"
-    
-    # --- MENSAJE DE ÉXITO DEL 32B ---
-    logger.info(
-        f"screener: 32B took the final decision succesfully for the paper {paper.get('paper_id')}",
-        extra={"paper_id": paper.get("paper_id"), "node": "screener"},
-    )
-    # --------------------------------
-    
-    return second, "32b"
-
-# --- LangGraph Node ---
-async def screener_node(state: AxiomState) -> dict:
-    """Nodo del grafo. Devuelve deltas para los reducers de operator.add."""
+    El reducer del state es `operator.add` para screened/excluded/errors, así
+    que screener_32b puede acumular sin pisar lo que dejamos aquí.
+    """
     papers = state.get("papers_found", [])
     prisma = state.get("prisma_criteria") or {}
 
     if not papers:
-        logger.warning("screener: papers_found empty, nothing to screen", extra={"node": "screener"})
+        logger.warning("screener_7b: papers_found empty, nothing to screen", extra={"node": "screener_7b"})
         return {}
 
     prisma_json = json.dumps(prisma, ensure_ascii=False)
-    sem = asyncio.Semaphore(MAX_CONCURRENT)
+    sem = asyncio.Semaphore(MAX_CONCURRENT_7B)
 
-    async def _gated(p: dict):
+    async def _gated(p: dict) -> ScreenerDecision | None:
+        # Short-circuit para papers sin abstract: no gastamos LLM.
+        if not (p.get("abstract") or "").strip():
+            return _empty_abstract_decision()
         async with sem:
-            return await _cascade_screen(p, prisma_json)
+            return await _screen_one(
+                p, prisma_json, settings.model_7b_name, "FEATHERLESS_7B",
+            )
 
-    # return_exceptions aisla fallos de papers individuales[cite: 2]
     results = await asyncio.gather(
         *(_gated(p) for p in papers),
         return_exceptions=True,
@@ -320,43 +368,172 @@ async def screener_node(state: AxiomState) -> dict:
 
     screened: list[dict] = []
     excluded: list[dict] = []
-    errors:   list[dict] = []
+    to_escalate: list[dict] = []
+    errors: list[dict] = []
 
     for paper, result in zip(papers, results):
         pid = paper.get("paper_id", "unknown_id")
 
         if isinstance(result, Exception):
             errors.append({
-                "node": "screener",
+                "node": "screener_7b",
                 "paper_id": pid,
                 "error": f"{type(result).__name__}: {result}",
             })
             continue
 
-        decision, route = result
-        if decision is None:
+        if result is None:
             errors.append({
-                "node": "screener",
+                "node": "screener_7b",
                 "paper_id": pid,
-                "error": "screener_failed_both_models",
+                "error": "screener_7b_failed",
             })
             continue
 
-        screened_paper = {
+        # Caso especial: empty-abstract short-circuit. Conserva route legacy
+        # "skip_no_abstract" para no romper el contrato hacia el writer.
+        if result.reason == "unavailable_full_text":
+            screened.append({
+                **paper,
+                "screening": {**result.model_dump(), "route": "skip_no_abstract"},
+            })
+            continue
+
+        # 7B decisivo (no requiere escalación) → emisión final con route="7b".
+        if not _should_escalate(result):
+            screened_paper = {
+                **paper,
+                "screening": {**result.model_dump(), "route": "7b"},
+            }
+            if result.decision == "exclude":
+                excluded.append(screened_paper)
+            else:
+                screened.append(screened_paper)
+            continue
+
+        # 7B requiere escalación → mandamos al 32B con el veredicto 7B
+        # adjunto para usarlo como fallback si el 32B falla.
+        to_escalate.append({
             **paper,
-            "screening": {**decision.model_dump(), "route": route},
+            "_7b_decision": result.model_dump(),
+        })
+
+    logger.info(
+        "screener_7b: %d incl/uncert directos, %d excl, %d to_escalate, %d errores (de %d papers)",
+        len(screened), len(excluded), len(to_escalate), len(errors), len(papers),
+    )
+
+    return {
+        "screened_papers":    screened,
+        "papers_excluded":    excluded,
+        "papers_to_escalate": to_escalate,
+        "errors":             errors,
+    }
+
+
+async def screener_32b_node(state: AxiomState) -> dict:
+    """Fase 2 del screening: corre QwQ-32B sobre los papers escalados.
+
+    Consume `papers_to_escalate` (producido por screener_7b). Para cada paper:
+      - 32B éxito → emite con route="32b".
+      - 32B falla → fallback al veredicto 7B adjunto, route="7b_fallback".
+
+    Si no hay nada que escalar, no-op (return {}).
+    """
+    to_escalate = state.get("papers_to_escalate", []) or []
+    prisma = state.get("prisma_criteria") or {}
+
+    if not to_escalate:
+        logger.info("screener_32b: nothing to escalate, skipping", extra={"node": "screener_32b"})
+        return {}
+
+    prisma_json = json.dumps(prisma, ensure_ascii=False)
+    sem = asyncio.Semaphore(MAX_CONCURRENT_32B)
+
+    async def _gated(p: dict) -> ScreenerDecision | None:
+        async with sem:
+            # Pasamos el veredicto del 7B (adjunto por screener_7b_node) al
+            # 32B como contexto. Esto convierte al 32B en "informed second
+            # reviewer": en lugar de re-evaluar a ciegas, sabe qué dudó el
+            # 7B y puede enfocar su reasoning en esos puntos.
+            return await _screen_one(
+                p, prisma_json, settings.model_32b_name, "FEATHERLESS_32B",
+                prior_decision=p.get("_7b_decision"),
+            )
+
+    results = await asyncio.gather(
+        *(_gated(p) for p in to_escalate),
+        return_exceptions=True,
+    )
+
+    screened: list[dict] = []
+    excluded: list[dict] = []
+    errors:   list[dict] = []
+    n_resolved = 0
+    n_fallback = 0
+
+    for paper, result in zip(to_escalate, results):
+        pid = paper.get("paper_id", "unknown_id")
+        # Reconstruimos el paper sin el campo interno antes de emitir hacia
+        # el state global — `_7b_decision` es contrato privado del screener.
+        paper_clean = {k: v for k, v in paper.items() if k != "_7b_decision"}
+
+        if isinstance(result, Exception):
+            errors.append({
+                "node": "screener_32b",
+                "paper_id": pid,
+                "error": f"{type(result).__name__}: {result}",
+            })
+            # Aún así intentamos fallback al 7B si lo tenemos
+            result = None
+
+        if result is None:
+            # Fallback: usar veredicto 7B adjunto.
+            fallback_dump = paper.get("_7b_decision")
+            if not fallback_dump:
+                # Caso defensivo: no hay 7B decision adjunta (no debería pasar).
+                errors.append({
+                    "node": "screener_32b",
+                    "paper_id": pid,
+                    "error": "screener_32b_failed_no_fallback",
+                })
+                continue
+            logger.warning(
+                "screener_32b: 32b failed, keeping 7b veredict",
+                extra={"paper_id": pid, "node": "screener_32b"},
+            )
+            fb = ScreenerDecision(**fallback_dump)
+            screened_paper = {
+                **paper_clean,
+                "screening": {**fb.model_dump(), "route": "7b_fallback"},
+            }
+            if fb.decision == "exclude":
+                excluded.append(screened_paper)
+            else:
+                screened.append(screened_paper)
+            n_fallback += 1
+            continue
+
+        # 32B éxito → veredicto final.
+        logger.info(
+            "screener_32b: 32B took the final decision succesfully for the paper %s",
+            pid, extra={"paper_id": pid, "node": "screener_32b"},
+        )
+        screened_paper = {
+            **paper_clean,
+            "screening": {**result.model_dump(), "route": "32b"},
         }
-        
-        if decision.decision == "exclude":
+        if result.decision == "exclude":
             excluded.append(screened_paper)
         else:
             screened.append(screened_paper)
+        n_resolved += 1
 
     logger.info(
-        "screener: %d incl/uncert, %d excl, %d errores (de %d papers)",
-        len(screened), len(excluded), len(errors), len(papers),
+        "screener_32b: %d a evaluar, %d resolved, %d fallback_to_7b, %d errores",
+        len(to_escalate), n_resolved, n_fallback, len(errors),
     )
-    
+
     return {
         "screened_papers": screened,
         "papers_excluded": excluded,

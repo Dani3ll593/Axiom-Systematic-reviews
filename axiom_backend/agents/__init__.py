@@ -3,7 +3,7 @@ Módulo de agentes (Nodos de LangGraph) de Axiom.
 Exponemos los nodos listos para ser importados por src/graph.py.
 """
 from .searcher import run_searcher
-from .screener import screener_node
+from .screener import screener_7b_node, screener_32b_node
 from .extractor import run_extractor
 from .analyst_7b import analyst_7b_node
 from .analyst_32b import analyst_32b_node
@@ -12,7 +12,8 @@ from .writer import run_writer
 
 __all__ = [
     "run_searcher",
-    "screener_node",
+    "screener_7b_node",
+    "screener_32b_node",
     "run_extractor",
     "analyst_7b_node",
     "analyst_32b_node",

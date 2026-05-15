@@ -4,7 +4,7 @@
 import logging
 from enum import Enum
 
-from src.state import AxiomState
+from axiom_backend.state import AxiomState
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import httpx
 
-from src.config import settings
+from axiom_backend.config import settings
 
 logger = logging.getLogger(__name__)
 

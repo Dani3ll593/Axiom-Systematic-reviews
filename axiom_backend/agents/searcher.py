@@ -36,10 +36,11 @@ from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from src.config import settings
-from src.prompts import SEARCHER_PROMPT
-from src.state import AxiomState
-from src.tools.access_check import check_access_async
+from axiom_backend.config import settings
+from axiom_backend.prompts import SEARCHER_PROMPT
+from axiom_backend.state import AxiomState
+from axiom_backend.tools.access_check import check_access_async
+from axiom_backend.tools.llm_router import LLM_FEATHERLESS, FEATHERLESS_SEMAPHORE
 
 logger = logging.getLogger(__name__)
 
@@ -120,11 +121,12 @@ def _get_semaphore(name: str) -> asyncio.Semaphore:
 def _get_llm_client():
     global _llm_client
     if _llm_client is None:
+        # Cliente Featherless único (definido en llm_router) envuelto con
+        # instructor para validación Pydantic + auto-retry. Mantenemos el
+        # cache _llm_client por si instructor.from_openai es costoso en
+        # cold start (lo es: importa jsonschema + extra introspección).
         _llm_client = instructor.from_openai(
-            AsyncOpenAI(
-                base_url=settings.vllm_url_7b,
-                api_key=settings.vllm_api_key or "EMPTY",
-            ),
+            LLM_FEATHERLESS,
             mode=instructor.Mode.JSON,
         )
     return _llm_client
@@ -168,19 +170,23 @@ async def _decompose_query(question: str, prisma: dict) -> SearchDecomposition |
         (_DECOMP_PROFILE_DEFAULT, _DECOMP_PROFILE_RESCUE), start=1
     ):
         try:
-            return await asyncio.wait_for(
-                client.chat.completions.create(
-                    model=settings.model_7b_name,
-                    response_model=SearchDecomposition,
-                    messages=[
-                        {"role": "system", "content": SEARCHER_PROMPT},
-                        {"role": "user",   "content": user_msg},
-                    ],
-                    max_retries=2,
-                    **profile,
-                ),
-                timeout=LLM_TIMEOUT_S,
-            )
+            # El semáforo global de Featherless protege contra exceder
+            # los 4 units totales del plan. Sin esto, instructor hace
+            # POST en paralelo sin sincronización → 429 en cascada.
+            async with FEATHERLESS_SEMAPHORE:
+                return await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=settings.model_7b_name,
+                        response_model=SearchDecomposition,
+                        messages=[
+                            {"role": "system", "content": SEARCHER_PROMPT},
+                            {"role": "user",   "content": user_msg},
+                        ],
+                        max_retries=2,
+                        **profile,
+                    ),
+                    timeout=LLM_TIMEOUT_S,
+                )
         except (ValidationError, asyncio.TimeoutError) as e:
             logger.error(
                 "searcher: decomposition timeout/validation (attempt %d)",

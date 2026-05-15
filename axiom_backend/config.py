@@ -24,18 +24,18 @@ class Settings(BaseSettings):
 
     # ─── Modelos por Rol ───
     # IDs deben coincidir con los disponibles en featherless.ai/models.
-    model_7b_name: str = "Qwen/Qwen2.5-72B-Instruct"
+    model_7b_name: str = "Qwen/Qwen2.5-7B-Instruct"
     # Reasoning model (DeepSeek-R1) usado por: screener uncertain pass,
     # analyst_32b, gap_finder, rob_assessor, grade_profiler.
-    model_32b_name: str = "deepseek-ai/DeepSeek-R1"
+    model_32b_name: str = "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B"
     # Writer model (Kimi-K2) — narrativa larga coherente para reportes APA 7.
     # Los agentes existentes aún usan model_32b_name; activar Kimi-K2 requiere
     # un cambio surgical en writer.py (próximo paso).
-    model_writer_name: str = "moonshotai/Kimi-K2-Instruct"
+    model_writer_name: str = "moonshotai/Kimi-K2-Instruct-0905"
     # Light reasoning (DeepSeek-V3) para analyst_7b — DEBE ser distinto a
     # model_32b_name para que el reconciler tenga señal de desacuerdo útil.
     # Activarlo requiere cambio en analyst_7b.py (próximo paso).
-    model_light_reasoning_name: str = "deepseek-ai/DeepSeek-V3"
+    model_light_reasoning_name: str = "Qwen/Qwen2.5-7B-Instruct"
 
     # ─── Modo Cochrane (Risk of Bias + GRADE) ───
     # Kill-switch global del servidor. Si False, los nodos rob_assessor y

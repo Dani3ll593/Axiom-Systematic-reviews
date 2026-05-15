@@ -7,10 +7,10 @@ import logging
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from src.state import AxiomState
-from src.config import settings
-from src.tools.llm_router import LLM_32B, extract_json_from_response
-from src.prompts import GAPFINDER_PROMPT
+from axiom_backend.state import AxiomState
+from axiom_backend.config import settings
+from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response
+from axiom_backend.prompts import GAPFINDER_PROMPT
 
 logger = logging.getLogger(__name__)
 

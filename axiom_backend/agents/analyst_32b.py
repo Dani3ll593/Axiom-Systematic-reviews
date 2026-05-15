@@ -4,10 +4,10 @@ import asyncio
 import json
 import logging
 
-from src.state import AxiomState
-from src.config import settings
-from src.tools.llm_router import LLM_32B, extract_json_from_response
-from src.prompts import ANALYST_PROMPT_32B
+from axiom_backend.state import AxiomState
+from axiom_backend.config import settings
+from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response
+from axiom_backend.prompts import ANALYST_PROMPT_32B
 
 logger = logging.getLogger(__name__)
 

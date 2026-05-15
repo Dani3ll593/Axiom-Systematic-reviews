@@ -51,9 +51,12 @@ def _read_json(filename: str) -> dict:
 # Agente 1 — Searcher
 SEARCHER_PROMPT: str = _read_text("searcher_prompt.md")
 
-# Agente 2 — Screener
-SCREENER_PROMPT:  str = _read_text("screener_prompt.md")
-SCREENER_FEWSHOT: str = _read_text("screener_fewshot.md")
+# Agente 2 — Screener (two-stage cascade: 7B first reviewer + 32B adjudicator)
+# Cada modelo tiene su propio prompt y few-shot, alineados a su rol.
+SCREENER_PROMPT_7B:   str = _read_text("screener_prompt_7b.md")
+SCREENER_FEWSHOT_7B:  str = _read_text("screener_fewshot_7b.md")
+SCREENER_PROMPT_32B:  str = _read_text("screener_prompt_32b.md")
+SCREENER_FEWSHOT_32B: str = _read_text("screener_fewshot_32b.md")
 
 # Agente 3 — Extractor
 # EXTRACTION_PROMPT is a template with a {schema} placeholder. The agent
@@ -84,8 +87,10 @@ PRISMA_CRITERIA_TEMPLATE: dict = _read_json("prisma_criteria_template.json")
 
 __all__ = [
     "SEARCHER_PROMPT",
-    "SCREENER_PROMPT",
-    "SCREENER_FEWSHOT",
+    "SCREENER_PROMPT_7B",
+    "SCREENER_FEWSHOT_7B",
+    "SCREENER_PROMPT_32B",
+    "SCREENER_FEWSHOT_32B",
     "EXTRACTION_PROMPT",
     "EXTRACTOR_SCHEMA",
     "ANALYST_PROMPT_7B",

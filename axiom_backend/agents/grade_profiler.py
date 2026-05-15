@@ -31,10 +31,10 @@ import logging
 
 from pydantic import BaseModel, ValidationError, Field
 
-from src.state import AxiomState
-from src.config import settings
-from src.tools.llm_router import LLM_32B, extract_json_from_response
-from src.prompts import GRADE_PROFILER_PROMPT
+from axiom_backend.state import AxiomState
+from axiom_backend.config import settings
+from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response
+from axiom_backend.prompts import GRADE_PROFILER_PROMPT
 
 logger = logging.getLogger(__name__)
 
