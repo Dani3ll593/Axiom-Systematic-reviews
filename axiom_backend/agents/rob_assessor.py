@@ -35,7 +35,7 @@ from pydantic import BaseModel, ValidationError, Field
 
 from axiom_backend.state import AxiomState
 from axiom_backend.config import settings
-from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response
+from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response, featherless_credit, COST_32B
 from axiom_backend.prompts import ROB_ASSESSOR_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -126,20 +126,22 @@ async def _assess_paper(paper: dict) -> dict | None:
     user_msg = f"PAPER TO ASSESS:\n{json.dumps(pruned, ensure_ascii=False)}"
 
     try:
-        response = await asyncio.wait_for(
-            LLM_32B.chat.completions.create(
-                model=settings.model_32b_name,
-                messages=[
-                    {"role": "system", "content": ROB_ASSESSOR_PROMPT},
-                    {"role": "user",   "content": user_msg},
-                ],
-                # Bajo temp: queremos juicios consistentes, no creatividad.
-                temperature=0.2,
-                # Extra para el bloque <think> de R1 + el JSON final.
-                max_tokens=4096,
-            ),
-            timeout=TIMEOUT_S,
-        )
+        # Cap global de Featherless: 32B cuesta 2 units.
+        async with featherless_credit(cost=COST_32B):
+            response = await asyncio.wait_for(
+                LLM_32B.chat.completions.create(
+                    model=settings.model_32b_name,
+                    messages=[
+                        {"role": "system", "content": ROB_ASSESSOR_PROMPT},
+                        {"role": "user",   "content": user_msg},
+                    ],
+                    # Bajo temp: queremos juicios consistentes, no creatividad.
+                    temperature=0.2,
+                    # Extra para el bloque <think> de R1 + el JSON final.
+                    max_tokens=4096,
+                ),
+                timeout=TIMEOUT_S,
+            )
 
         raw_text = response.choices[0].message.content
         parsed_json = extract_json_from_response(raw_text)

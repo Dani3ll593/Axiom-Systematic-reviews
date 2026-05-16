@@ -6,7 +6,7 @@ import logging
 
 from axiom_backend.state import AxiomState
 from axiom_backend.config import settings
-from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response
+from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response, featherless_credit, COST_32B
 from axiom_backend.prompts import ANALYST_PROMPT_32B
 
 logger = logging.getLogger(__name__)
@@ -33,18 +33,24 @@ async def _analyze_cluster_32b(cluster: list[dict], index: int) -> dict | None:
     user_msg = f"INPUT CLUSTER:\n{json.dumps(simplified_cluster, ensure_ascii=False)}"
 
     try:
-        response = await asyncio.wait_for(
-            LLM_32B.chat.completions.create(
-                model=settings.model_32b_name,
-                messages=[
-                    {"role": "system", "content": ANALYST_PROMPT_32B},
-                    {"role": "user",   "content": user_msg},
-                ],
-                temperature=0.3,
-                max_tokens=4096,   # tokens extra para el bloque <think>
-            ),
-            timeout=TIMEOUT_S,
-        )
+        # Cap global de Featherless: 32B cuesta 2 units. Con cap=4, máximo
+        # 2 papers en flight simultáneamente. Antes este sitio NO usaba
+        # semáforo — el fan-out clusterer→(analyst_7b + analyst_32b) podía
+        # tener 2×7B + 2×32B = 2+4 = 6 units intentando ejecutar, disparando
+        # los 429s que vimos en los logs.
+        async with featherless_credit(cost=COST_32B):
+            response = await asyncio.wait_for(
+                LLM_32B.chat.completions.create(
+                    model=settings.model_32b_name,
+                    messages=[
+                        {"role": "system", "content": ANALYST_PROMPT_32B},
+                        {"role": "user",   "content": user_msg},
+                    ],
+                    temperature=0.3,
+                    max_tokens=4096,   # tokens extra para el bloque <think>
+                ),
+                timeout=TIMEOUT_S,
+            )
 
         raw_text = response.choices[0].message.content
         parsed_json = extract_json_from_response(raw_text)

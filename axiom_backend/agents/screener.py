@@ -47,7 +47,7 @@ from axiom_backend.prompts import (
     SCREENER_FEWSHOT_32B,
 )
 from axiom_backend.state import AxiomState
-from axiom_backend.tools.llm_router import LLM_FEATHERLESS, FEATHERLESS_SEMAPHORE
+from axiom_backend.tools.llm_router import LLM_FEATHERLESS, featherless_credit, COST_7B, COST_32B
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 # medir el budget global de units, no solo el del screener.
 MAX_CONCURRENT_7B = 1
 MAX_CONCURRENT_32B = 1
-LLM_TIMEOUT_S = 30.0
+LLM_TIMEOUT_S = 90.0
 ESCALATE_CONFIDENCES = {"low"}
 ESCALATE_DECISIONS = {"uncertain"}
 
@@ -232,11 +232,12 @@ async def _screen_one(
                 # antes esto creaba un AsyncOpenAI por llamada al 32B, lo cual
                 # malgastaba conexiones del pool y se saltaba el semáforo global.
                 raw_client = LLM_FEATHERLESS
-                # Semáforo global: el 32B cuesta 2 units, así que con cap=4
-                # solo 2 papers pueden estar en flight simultáneo en el screener
-                # uncertain pass. Sin esto, los 4 papers paralelos del fan-out
-                # del 7B dispararían retries en cascada al escalar al 32B.
-                async with FEATHERLESS_SEMAPHORE:
+                # Semáforo credit-based: el 32B cuesta 2 units, así que con
+                # cap=4 solo 2 papers pueden estar en flight simultáneamente.
+                # Antes este sitio usaba FEATHERLESS_SEMAPHORE (legacy shim que
+                # adquiere 1 unit) → sub-contaba y disparaba 429s en cascada
+                # cuando otros agentes 32B estaban activos.
+                async with featherless_credit(cost=COST_32B):
                     respuesta_cruda = await asyncio.wait_for(
                         raw_client.chat.completions.create(
                             model=model,
@@ -305,10 +306,10 @@ async def _screen_one(
 
         # --- COMPORTAMIENTO NORMAL PARA QWEN 7B ---
         else:
-            # Semáforo global: el 7B cuesta 1 unit, hasta 4 papers paralelos.
+            # Semáforo credit-based: el 7B cuesta 1 unit, hasta 4 papers paralelos.
             # MAX_CONCURRENT local también es 4, así que el cuello de botella
             # es Featherless. Este lock previene los 429 que veíamos en run 2.
-            async with FEATHERLESS_SEMAPHORE:
+            async with featherless_credit(cost=COST_7B):
                 return await asyncio.wait_for(
                     client.chat.completions.create(
                         model=model,

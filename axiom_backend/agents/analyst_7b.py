@@ -7,7 +7,7 @@ import logging
  
 from axiom_backend.state import AxiomState
 from axiom_backend.config import settings
-from axiom_backend.tools.llm_router import LLM_7B, extract_json_from_response
+from axiom_backend.tools.llm_router import LLM_7B, extract_json_from_response, featherless_credit, COST_7B
 from axiom_backend.prompts import ANALYST_PROMPT_7B
  
 logger = logging.getLogger(__name__)
@@ -35,18 +35,23 @@ async def _analyze_cluster_7b(cluster: list[dict], index: int) -> dict | None:
     user_msg = f"INPUT CLUSTER:\n{json.dumps(simplified_cluster, ensure_ascii=False)}"
  
     try:
-        response = await asyncio.wait_for(
-            LLM_7B.chat.completions.create(
-                model=settings.model_7b_name,
-                messages=[
-                    {"role": "system", "content": ANALYST_PROMPT_7B},
-                    {"role": "user",   "content": user_msg},
-                ],
-                temperature=0.3,
-                max_tokens=2048,
-            ),
-            timeout=TIMEOUT_S,
-        )
+        # Cap global de Featherless: 7B cuesta 1 unit. El fan-out
+        # clusterer→(analyst_7b + analyst_32b) saturaba el cap antes
+        # de este wrapper porque ninguno de los dos analistas adquiría
+        # créditos. Ahora ambos compiten correctamente por units.
+        async with featherless_credit(cost=COST_7B):
+            response = await asyncio.wait_for(
+                LLM_7B.chat.completions.create(
+                    model=settings.model_7b_name,
+                    messages=[
+                        {"role": "system", "content": ANALYST_PROMPT_7B},
+                        {"role": "user",   "content": user_msg},
+                    ],
+                    temperature=0.3,
+                    max_tokens=2048,
+                ),
+                timeout=TIMEOUT_S,
+            )
  
         raw_text = response.choices[0].message.content
         parsed_json = extract_json_from_response(raw_text)

@@ -9,7 +9,7 @@ from pydantic import BaseModel, ValidationError
 
 from axiom_backend.state import AxiomState
 from axiom_backend.config import settings
-from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response
+from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response, featherless_credit, COST_32B
 from axiom_backend.prompts import GAPFINDER_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -58,18 +58,20 @@ async def _call_qwq_with_retry(user_msg: str) -> GapFinderOutput:
     last_err: Exception | None = None
     for attempt in (1, 2):
         try:
-            response = await asyncio.wait_for(
-                LLM_32B.chat.completions.create(
-                    model=settings.model_32b_name,
-                    messages=[
-                        {"role": "system", "content": GAPFINDER_PROMPT},
-                        {"role": "user",   "content": user_msg},
-                    ],
-                    temperature=0.4,
-                    max_tokens=4096,
-                ),
-                timeout=TIMEOUT_S,
-            )
+            # Cap global de Featherless: gap_finder usa 32B (cost=2).
+            async with featherless_credit(cost=COST_32B):
+                response = await asyncio.wait_for(
+                    LLM_32B.chat.completions.create(
+                        model=settings.model_32b_name,
+                        messages=[
+                            {"role": "system", "content": GAPFINDER_PROMPT},
+                            {"role": "user",   "content": user_msg},
+                        ],
+                        temperature=0.4,
+                        max_tokens=4096,
+                    ),
+                    timeout=TIMEOUT_S,
+                )
             raw_text = response.choices[0].message.content
             parsed_json = extract_json_from_response(raw_text)
             return GapFinderOutput(**parsed_json)

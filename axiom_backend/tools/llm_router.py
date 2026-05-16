@@ -71,11 +71,167 @@ LLM_WRITER = LLM_FEATHERLESS
 LLM_LIGHT  = LLM_FEATHERLESS
 
 
-# --- 2. Semáforo global de concurrencia ---------------------------------
-# Cap duro: settings.featherless_max_concurrent (default 4 = Premium plan).
-# Los agentes NUEVOS deben usar `featherless_call()` (abajo) que adquiere
-# este semáforo automáticamente.
-FEATHERLESS_SEMAPHORE = asyncio.Semaphore(settings.featherless_max_concurrent)
+# --- 2. Semáforo global credit-based ------------------------------------
+# CONTEXTO HISTÓRICO: antes esto era `asyncio.Semaphore(4)`, que cuenta
+# REQUESTS, no UNITS. Pero Featherless cobra:
+#   - Qwen-7B  → 1 unit por request
+#   - QwQ-32B  → 2 units por request
+# Plan feather_pro_plus = 4 units totales.
+#
+# Con el viejo Semaphore(4), era legal tener 4 requests del 32B en vuelo,
+# que serían 8 units → 429 RateLimitError "concurrency_limit_exceeded".
+#
+# La versión credit-based abajo conoce los costos. Cada agente declara su
+# costo (1 o 2). El semáforo libera cuando hay créditos suficientes, evitando
+# 429s en origen en vez de "manejarlos mejor" (que era el approach viejo).
+#
+# Patrón de uso recomendado (nuevo):
+#
+#     async with featherless_credit(cost=2):       # 32B
+#         response = await LLM_FEATHERLESS.chat.completions.create(...)
+#
+# El context manager adquiere y libera limpiamente incluso ante excepciones.
+
+class CreditedSemaphore:
+    """Semáforo basado en créditos (no en cantidad de requests).
+
+    `acquire(cost)` espera hasta que haya `cost` créditos disponibles.
+    `release(cost)` los devuelve y despierta a todos los waiters (notify_all
+    porque un waiter durmiendo pidiendo 1 podría avanzar aunque solo se
+    liberaran 2, etc — la espera no es FIFO estricta pero es starvation-free
+    en la práctica para nuestras cargas pequeñas).
+
+    Esto NO es un RateLimiter (no maneja tiempo, solo capacidad concurrente).
+    Si en el futuro Featherless agrega rate limits por minuto/hora, eso vivirá
+    en otra capa (probablemente con `aiolimiter` o equivalente).
+    """
+
+    def __init__(self, max_credits: int) -> None:
+        self._max = max_credits
+        self._available = max_credits
+        # Lock + Condition: Condition usa el lock para sincronizar wait/notify.
+        self._cond = asyncio.Condition()
+
+    async def acquire(self, cost: int) -> None:
+        if cost < 1 or cost > self._max:
+            raise ValueError(
+                f"cost={cost} fuera de rango [1, {self._max}]. "
+                f"Si un modelo cuesta más que el plan, no hay forma de servirlo."
+            )
+        async with self._cond:
+            # `while`, no `if`: la condición debe revalidarse después de cada
+            # notify_all porque varios waiters pueden ser despertados pero solo
+            # un subconjunto cabe con los créditos liberados.
+            while self._available < cost:
+                await self._cond.wait()
+            self._available -= cost
+
+    async def release(self, cost: int) -> None:
+        async with self._cond:
+            self._available += cost
+            # No queremos overshoot por bugs upstream (release sin acquire previo).
+            if self._available > self._max:
+                logger.warning(
+                    "CreditedSemaphore: release overshoot (available=%d > max=%d). "
+                    "Capando al máximo. Esto indica un release sin acquire previo.",
+                    self._available, self._max,
+                )
+                self._available = self._max
+            self._cond.notify_all()
+
+    @property
+    def available(self) -> int:
+        """Solo lectura, snapshot best-effort para diagnóstico/logging."""
+        return self._available
+
+    def credit(self, cost: int) -> "_CreditContext":
+        """Devuelve un async context manager que adquiere+libera `cost` créditos.
+
+        Uso: `async with sem.credit(cost=2): ...`
+        """
+        return _CreditContext(self, cost)
+
+
+class _CreditContext:
+    """Context manager para `CreditedSemaphore.credit(cost)`."""
+    __slots__ = ("_sem", "_cost", "_acquired")
+
+    def __init__(self, sem: CreditedSemaphore, cost: int) -> None:
+        self._sem = sem
+        self._cost = cost
+        self._acquired = False
+
+    async def __aenter__(self) -> "_CreditContext":
+        await self._sem.acquire(self._cost)
+        self._acquired = True
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        # Idempotente: solo libera si acquire tuvo éxito. Protege contra
+        # CancelledError entre acquire y body (raro pero posible).
+        if self._acquired:
+            await self._sem.release(self._cost)
+            self._acquired = False
+
+
+# Instancia global. Cap = settings.featherless_max_concurrent (4 en Premium).
+_FEATHERLESS_CREDITS = CreditedSemaphore(settings.featherless_max_concurrent)
+
+
+def featherless_credit(cost: int) -> _CreditContext:
+    """Context manager para adquirir `cost` créditos del cap global.
+
+    Uso típico desde un agente:
+
+        from axiom_backend.tools.llm_router import featherless_credit, LLM_FEATHERLESS
+
+        async with featherless_credit(cost=2):     # 2 = 32B, 1 = 7B
+            response = await LLM_FEATHERLESS.chat.completions.create(
+                model=settings.model_32b_name,
+                messages=...,
+            )
+
+    El cost es responsabilidad del caller — depende de qué modelo se va a usar.
+    Convención: 7B=1, 32B=2. Si en el futuro Featherless cambia los costos por
+    modelo, basta tocar la tabla de los callers (o centralizar en un helper).
+    """
+    return _FEATHERLESS_CREDITS.credit(cost)
+
+
+# Costos conocidos de Featherless por familia de modelo. Centralizado aquí
+# para que los agentes no hardcodeen 1/2. Si Featherless cambia los costos,
+# este es el único sitio que toca actualizar.
+#
+# Ver https://featherless.ai/pricing (al momento del refactor):
+#   - 7B  (Qwen2.5-7B-Instruct): 1 unit
+#   - 32B (DeepSeek-R1-Distill-Qwen-32B): 2 units
+#   - Modelos grandes (Kimi-K2, etc.) pueden costar más — TODO confirmar.
+COST_7B  = 1
+COST_32B = 2
+COST_WRITER = 2   # Kimi-K2-Instruct — TODO: confirmar contra docs Featherless
+COST_LIGHT  = 1
+
+
+# DEPRECATED — alias hacia el cap viejo que contaba REQUESTS, NO UNITS.
+# Solo lo conservamos para no romper imports legacy mientras migramos los
+# agentes. Migrar a `featherless_credit(cost=N)` cuando sea posible.
+#
+# El nombre se mantiene pero la implementación ahora delega al credit-based
+# usando cost=1 (asume que el caller es un 7B). Si el caller real es 32B,
+# este alias sub-cuenta y los 429s vuelven. **No usar en código nuevo.**
+class _LegacyFEATHERLESSSemaphoreShim:
+    """Shim para `async with FEATHERLESS_SEMAPHORE`: adquiere 1 crédito (asume 7B).
+
+    Si el agente caller hace 32B, esto es subcontar y eventualmente verá 429.
+    Migrar el caller a `featherless_credit(cost=COST_32B)`.
+    """
+    async def __aenter__(self):
+        await _FEATHERLESS_CREDITS.acquire(COST_7B)
+        return self
+    async def __aexit__(self, exc_type, exc, tb):
+        await _FEATHERLESS_CREDITS.release(COST_7B)
+
+FEATHERLESS_SEMAPHORE = _LegacyFEATHERLESSSemaphoreShim()
 
 
 async def featherless_call(
@@ -85,20 +241,41 @@ async def featherless_call(
     temperature: float = 0.3,
     max_tokens: int = 4096,
     timeout: float | None = None,
+    cost: int | None = None,
     **kwargs,
 ) -> str:
-    """Llamada a Featherless con el semáforo global aplicado.
+    """Llamada a Featherless con el semáforo credit-based aplicado.
 
     Retorna el `content` crudo de la respuesta (string). Si el caller
     necesita más metadata (logprobs, finish_reason), llama directamente
     a LLM_FEATHERLESS.chat.completions.create dentro de un bloque
-    `async with FEATHERLESS_SEMAPHORE`.
+    `async with featherless_credit(cost=N)`.
+
+    `cost` es el costo en units del modelo. Si no se pasa, se infiere del
+    nombre del modelo (7B=1, 32B/Kimi=2). Si la inferencia falla, asume 1
+    con warning — pasar cost=N explícito para evitar adivinanzas.
 
     Raises:
         openai.APIError y subclases: errores de red / 4xx / 5xx.
         asyncio.TimeoutError: si `timeout` se excede.
     """
-    async with FEATHERLESS_SEMAPHORE:
+    if cost is None:
+        # Heurística simple por nombre. Para precisión, los callers deberían
+        # pasar `cost` explícito o usar las constantes COST_7B/COST_32B/etc.
+        m = (model or "").lower()
+        if "32b" in m or "kimi" in m or "k2" in m:
+            cost = COST_32B
+        elif "7b" in m or "qwen2.5" in m:
+            cost = COST_7B
+        else:
+            logger.warning(
+                "featherless_call: no pude inferir cost para model=%r, "
+                "usando cost=1. Pasa `cost=N` explícito para evitar warnings.",
+                model,
+            )
+            cost = 1
+
+    async with featherless_credit(cost=cost):
         coro = LLM_FEATHERLESS.chat.completions.create(
             model=model,
             messages=messages,

@@ -39,7 +39,7 @@ from axiom_backend.config import settings
 from axiom_backend.prompts import SEARCHER_PROMPT
 from axiom_backend.state import AxiomState
 from axiom_backend.tools.access_check import check_access_async
-from axiom_backend.tools.llm_router import LLM_FEATHERLESS, FEATHERLESS_SEMAPHORE
+from axiom_backend.tools.llm_router import LLM_FEATHERLESS, featherless_credit, COST_7B
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +168,7 @@ async def _decompose_query(question: str, prisma: dict) -> SearchDecomposition |
             # El semáforo global de Featherless protege contra exceder
             # los 4 units totales del plan. Sin esto, instructor hace
             # POST en paralelo sin sincronización → 429 en cascada.
-            async with FEATHERLESS_SEMAPHORE:
+            async with featherless_credit(cost=COST_7B):
                 return await asyncio.wait_for(
                     client.chat.completions.create(
                         model=settings.model_7b_name,

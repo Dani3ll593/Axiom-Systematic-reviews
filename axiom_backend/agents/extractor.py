@@ -25,7 +25,7 @@ from axiom_backend.config import settings
 from axiom_backend.prompts import EXTRACTION_PROMPT
 from axiom_backend.state import AxiomState
 from axiom_backend.tools.pdf_parser import parse_pdf
-from axiom_backend.tools.llm_router import LLM_FEATHERLESS, FEATHERLESS_SEMAPHORE
+from axiom_backend.tools.llm_router import LLM_FEATHERLESS, featherless_credit, COST_7B
 
 logger = logging.getLogger(__name__)
 
@@ -176,11 +176,11 @@ async def _extract_one(
     text_to_process = raw_text[:MAX_INPUT_CHARS]
 
     try:
-        # Semáforo global de Featherless: el extractor procesa hasta
-        # MAX_CONCURRENT=4 papers en paralelo, pero todos comparten el cap
-        # de 4 units (Qwen-7B cost=1). Este lock fuerza que ninguna llamada
-        # extra (de otro agente paralelo) cause overflow del plan.
-        async with FEATHERLESS_SEMAPHORE:
+        # Semáforo credit-based de Featherless: el extractor usa Qwen-7B
+        # (cost=1). El cap global de 4 units es compartido con todos los
+        # agentes; este lock previene 429s cuando otros agentes (analyst,
+        # rob_assessor) corren concurrentemente.
+        async with featherless_credit(cost=COST_7B):
             extraction = await asyncio.wait_for(
                 client.chat.completions.create(
                     model=model,

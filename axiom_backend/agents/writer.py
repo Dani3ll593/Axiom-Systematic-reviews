@@ -11,7 +11,7 @@ from pydantic import BaseModel, ValidationError
 
 from axiom_backend.state import AxiomState
 from axiom_backend.config import settings
-from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response
+from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response, featherless_credit, COST_32B
 from axiom_backend.prompts import WRITER_SYNTHESIS_PROMPT, WRITER_APA7_RULES
 
 logger = logging.getLogger(__name__)
@@ -227,18 +227,20 @@ async def _call_qwq_with_retry(system_prompt: str, user_msg: str) -> "SynthesisO
     last_err: Exception | None = None
     for attempt, temperature in ((1, 0.3), (2, 0.55)):
         try:
-            response = await asyncio.wait_for(
-                LLM_32B.chat.completions.create(
-                    model=settings.model_32b_name,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user",   "content": user_msg},
-                    ],
-                    temperature=temperature,
-                    max_tokens=MAX_TOKENS,
-                ),
-                timeout=TIMEOUT_S,
-            )
+            # Cap global de Featherless: writer synthesis usa 32B (cost=2).
+            async with featherless_credit(cost=COST_32B):
+                response = await asyncio.wait_for(
+                    LLM_32B.chat.completions.create(
+                        model=settings.model_32b_name,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user",   "content": user_msg},
+                        ],
+                        temperature=temperature,
+                        max_tokens=MAX_TOKENS,
+                    ),
+                    timeout=TIMEOUT_S,
+                )
             msg = response.choices[0].message
             raw_text = msg.content or getattr(msg, "reasoning", None) or ""
             parsed_json = extract_json_from_response(raw_text)
