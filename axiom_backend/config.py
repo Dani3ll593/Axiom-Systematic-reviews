@@ -76,6 +76,21 @@ class Settings(BaseSettings):
     # max_tokens (4096) + buffer (~500) ≈ 6K, deja ~26K para user msg.
     analyst_max_user_chars: int = 28000
 
+    # ─── Searcher ───
+    # Cap por API (PubMed, OpenAlex, arXiv, CrossRef, Semantic Scholar). Cada
+    # uno recibe este cap. Cuidado: pedirle 500 a cada uno puede causar 429s
+    # de rate limit, especialmente en arXiv. Sweet spot empírico: 200-300.
+    # Default 50 (para `main.py` rápido); para evaluación contra gold standards
+    # subir a 200-300.
+    #
+    # Alias `AXIOM_MAX_RESULTS_PER_API` mantiene compatibilidad con el `.env`
+    # actual (el resto del proyecto NO usa prefijo, así que no podemos
+    # configurar env_prefix global — usamos validation_alias solo aquí).
+    max_results_per_api: int = Field(
+        default=50,
+        validation_alias="AXIOM_MAX_RESULTS_PER_API",
+    )
+
     # ─── UI y Streamlit ───
     streamlit_server_port: int = 8501
 

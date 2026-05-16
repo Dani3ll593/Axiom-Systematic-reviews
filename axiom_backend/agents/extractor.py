@@ -181,7 +181,7 @@ async def _extract_one(
         # de 4 units (Qwen-7B cost=1). Este lock fuerza que ninguna llamada
         # extra (de otro agente paralelo) cause overflow del plan.
         async with FEATHERLESS_SEMAPHORE:
-            return await asyncio.wait_for(
+            extraction = await asyncio.wait_for(
                 client.chat.completions.create(
                     model=model,
                     response_model=PaperExtraction,
@@ -197,6 +197,11 @@ async def _extract_one(
                 timeout=LLM_TIMEOUT_S,
             )
 
+        # Enrichment con metadata del paper original. Antes este bloque estaba
+        # DESPUÉS del `return` dentro del `async with`, así que nunca se
+        # ejecutaba (código muerto). Resultado: cuando el LLM no extraía
+        # title/authors/doi/year (común cuando solo ve el abstract), esos
+        # campos quedaban None/"n.d." en vez de tomarse del paper original.
         if extraction:
             extraction.title = extraction.title or paper.get("title")
             extraction.authors = extraction.authors or paper.get("authors", [])
@@ -204,10 +209,21 @@ async def _extract_one(
             if extraction.year in (None, "n.d.") and paper.get("year"):
                 extraction.year = paper["year"]
 
+        return extraction
+
     except (ValidationError, json.JSONDecodeError, asyncio.TimeoutError) as e:
+        # DIAGNOSTIC: simétrico al patch del screener. El log anterior solo
+        # decía el tipo de excepción, lo cual no diferenciaba un timeout
+        # genuino de un ValidationError de Pydantic (donde el mensaje dice
+        # exactamente qué campo falló y por qué).
         logger.error(
-            f"Extraction parsing/timeout failed: {type(e).__name__}",
-            extra={"paper_id": paper.get("paper_id"), "node": "extractor"}
+            "extractor: inner exception: %s - %s",
+            type(e).__name__, str(e)[:300],
+            extra={
+                "paper_id": paper.get("paper_id"),
+                "model": model,
+                "node": "extractor",
+            },
         )
         return None
     except Exception as e:

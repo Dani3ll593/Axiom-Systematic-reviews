@@ -12,7 +12,12 @@ from axiom_backend.agents.analyst_7b import analyst_7b_node
 from axiom_backend.agents.analyst_32b import analyst_32b_node
 from axiom_backend.tools.reconciler import reconciler_node
 from axiom_backend.agents.gap_finder import run_gap_finder
-from axiom_backend.agents.writer import run_writer
+from axiom_backend.agents.writer import (
+    writer_synthesis_node,
+    writer_tables_node,
+    writer_references_node,
+    writer_assembler_node,
+)
 
 # Cochrane nodes (solo se invocan si state["cochrane_mode"] AND settings.cochrane_mode_enabled)
 from axiom_backend.agents.rob_assessor import run_rob_assessor
@@ -22,10 +27,17 @@ from axiom_backend.agents.grade_profiler import run_grade_profiler
 # ==============================================================================
 # LÓGICA DE CONDICIONES (Ruteo Dinámico)
 # ==============================================================================
-def check_screening_results(state: AxiomState) -> Literal["extractor", "writer"]:
-    """Si el screener rechaza TODOS los papers, saltamos directo al writer para informar."""
+def check_screening_results(state: AxiomState) -> Literal["extractor", "writer_synthesis"]:
+    """Si el screener rechaza TODOS los papers, saltamos directo al writer para informar.
+
+    El destino "writer_synthesis" es el primer nodo de la cadena del writer
+    bifásico (synthesis → tables → references → assembler). Saltarse el
+    extractor implica saltarse también análisis/cochrane/gap_finder, así que
+    el writer recibe state vacío en clusters/gaps — el prompt y los nodos
+    Python lo manejan emitiendo prosa breve "no incluidos relevantes".
+    """
     if not state.get("screened_papers"):
-        return "writer"
+        return "writer_synthesis"
     return "extractor"
 
 
@@ -67,7 +79,10 @@ def build_axiom_graph():
     builder.add_node("reconciler", reconciler_node)
     builder.add_node("grade_profiler", run_grade_profiler)    # Cochrane only
     builder.add_node("gapfinder", run_gap_finder)
-    builder.add_node("writer", run_writer)
+    builder.add_node("writer_synthesis",  writer_synthesis_node)
+    builder.add_node("writer_tables",     writer_tables_node)
+    builder.add_node("writer_references", writer_references_node)
+    builder.add_node("writer_assembler",  writer_assembler_node)
 
     # 2. Definir Aristas (Flujo)
     builder.add_edge(START, "searcher")
@@ -101,8 +116,14 @@ def build_axiom_graph():
     builder.add_conditional_edges("reconciler", route_after_reconciler)
     builder.add_edge("grade_profiler", "gapfinder")
 
-    builder.add_edge("gapfinder", "writer")
-    builder.add_edge("writer", END)
+    builder.add_edge("gapfinder", "writer_synthesis")
+    # Cadena del writer (Paso B completo): synthesis (LLM) → tables (Python) →
+    # references (Python) → assembler (Python). Cada nodo escribe su key
+    # intermedia en el state; el assembler concatena los 3 y produce 1 PDF.
+    builder.add_edge("writer_synthesis",  "writer_tables")
+    builder.add_edge("writer_tables",     "writer_references")
+    builder.add_edge("writer_references", "writer_assembler")
+    builder.add_edge("writer_assembler",  END)
 
     return builder.compile()
 

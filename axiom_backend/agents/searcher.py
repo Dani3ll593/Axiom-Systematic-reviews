@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import xml.etree.ElementTree as ET
 from typing import Literal
 from urllib.parse import quote_plus
@@ -49,20 +48,16 @@ LLM_TIMEOUT_S = 120.0
 SCIELO_TIMEOUT_S = 20.0          # Scielo p50 ~4.2s, dejar margen
 DEFAULT_HTTP_TIMEOUT_S = 30.0
 
-# Cap por API. Default 50 para demos/main.py rápidos. Si EVAL_MODE=1 se sube
-# a 200 para evaluación contra gold standards (recall PRISMA real).
-# Override manual via AXIOM_MAX_RESULTS_PER_API env var (toma precedencia).
-def _resolve_max_results_per_api() -> int:
-    explicit = os.environ.get("AXIOM_MAX_RESULTS_PER_API")
-    if explicit and explicit.isdigit():
-        return int(explicit)
-    if os.environ.get("EVAL_MODE") in ("1", "true", "True"):
-        return 200
-    return 50
-
-MAX_RESULTS_PER_API = _resolve_max_results_per_api()
-logger.info("searcher: MAX_RESULTS_PER_API = %d (EVAL_MODE=%s)",
-            MAX_RESULTS_PER_API, os.environ.get("EVAL_MODE", "0"))
+# Cap por API. Default 50 (válido para demos/main.py rápidos). Override vía
+# `AXIOM_MAX_RESULTS_PER_API` en `.env` (leída por pydantic-settings →
+# `settings.max_results_per_api`).
+#
+# NOTA HISTÓRICA: antes esto se leía vía `os.environ.get()` directo, lo cual
+# fallaba porque `pydantic-settings` carga el `.env` en `settings.X` pero NO
+# en `os.environ`. Resultado: aunque el `.env` decía 500, el searcher
+# devolvía 50. Ahora leemos de settings → consistente con el resto del proyecto.
+MAX_RESULTS_PER_API = settings.max_results_per_api
+logger.info("searcher: MAX_RESULTS_PER_API = %d", MAX_RESULTS_PER_API)
 
 ACCESS_CHECK_CONCURRENCY = 16    # Para no saturar Unpaywall/OpenAlex/Crossref
 

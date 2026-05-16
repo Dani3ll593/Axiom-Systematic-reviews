@@ -248,8 +248,18 @@ async def _screen_one(
                         timeout=600.0,
                     )
                 
-                texto = respuesta_cruda.choices[0].message.content
-                
+                # Featherless (y otros providers de modelos R1-style) separa
+                # el reasoning del answer: cuando un modelo emite tags como
+                # <think>...</think><json>...</json>, el provider rutea el
+                # output a `message.reasoning` y deja `content` vacío.
+                # Leemos ambos campos para cubrir los dos formatos:
+                #   - OpenAI estándar       → content tiene el texto completo
+                #   - Featherless R1-style  → content vacío, reasoning lo tiene
+                # limpiar_respuesta_qwq ya sabe parsear ambos casos porque
+                # busca <json>...</json> en el texto crudo.
+                msg = respuesta_cruda.choices[0].message
+                texto = msg.content or getattr(msg, "reasoning", None) or ""
+
                 if not texto:
                     raise ValueError("Texto vacío")
                     
@@ -313,12 +323,31 @@ async def _screen_one(
                     timeout=LLM_TIMEOUT_S,
                 )
 
-    except (ValidationError, json.JSONDecodeError, asyncio.TimeoutError, ValueError):
+    except (ValidationError, json.JSONDecodeError, asyncio.TimeoutError, ValueError) as e:
+        # DIAGNOSTIC: estos son los fallos esperables del 7B con instructor
+        # (validation de schema, parse JSON, timeout, value error). Antes
+        # caían en silencio y solo aparecían como "screener_7b_failed".
+        # Ahora logueamos qué pasó para poder diagnosticar.
+        # Simétrico al patch que aplicamos al 32B.
+        logger.error(
+            "screener: %s inner exception: %s - %s",
+            "32b" if is_32b else "7b",
+            type(e).__name__, str(e)[:300],
+            extra={
+                "paper_id": paper.get("paper_id"),
+                "model": model,
+                "node": "screener_32b" if is_32b else "screener_7b",
+            },
+        )
         return None
     except Exception as e:
         logger.exception(
             f"screener LLM call failed: {str(e)}",
-            extra={"paper_id": paper.get("paper_id"), "model": model, "node": "screener"},
+            extra={
+                "paper_id": paper.get("paper_id"),
+                "model": model,
+                "node": "screener_32b" if is_32b else "screener_7b",
+            },
         )
         return None
 
@@ -352,14 +381,23 @@ async def screener_7b_node(state: AxiomState) -> dict:
     prisma_json = json.dumps(prisma, ensure_ascii=False)
     sem = asyncio.Semaphore(MAX_CONCURRENT_7B)
 
-    async def _gated(p: dict) -> ScreenerDecision | None:
-        # Short-circuit para papers sin abstract: no gastamos LLM.
+    async def _gated(p: dict) -> tuple[ScreenerDecision | None, bool]:
+        """Retorna (decision, is_short_circuit).
+
+        is_short_circuit=True solo cuando el paper no tiene abstract — no
+        gastamos LLM, retornamos `_empty_abstract_decision()` directamente.
+        El loop usa este flag (NO `result.reason`) para mapear a la route
+        `skip_no_abstract`. Esto distingue el caso determinista del caso en
+        que el MODELO retorne `reason=unavailable_full_text`, que es señal
+        legítima de ambigüedad y debe escalar al 32B.
+        """
         if not (p.get("abstract") or "").strip():
-            return _empty_abstract_decision()
+            return _empty_abstract_decision(), True
         async with sem:
-            return await _screen_one(
+            decision = await _screen_one(
                 p, prisma_json, settings.model_7b_name, "FEATHERLESS_7B",
             )
+            return decision, False
 
     results = await asyncio.gather(
         *(_gated(p) for p in papers),
@@ -382,7 +420,19 @@ async def screener_7b_node(state: AxiomState) -> dict:
             })
             continue
 
-        if result is None:
+        decision, is_short_circuit = result
+
+        # Caso 1: paper sin abstract → short-circuit determinista.
+        # Conserva route legacy "skip_no_abstract" para no romper writer.
+        if is_short_circuit:
+            screened.append({
+                **paper,
+                "screening": {**decision.model_dump(), "route": "skip_no_abstract"},
+            })
+            continue
+
+        # Caso 2: el modelo corrió pero falló (validation/timeout/parse).
+        if decision is None:
             errors.append({
                 "node": "screener_7b",
                 "paper_id": pid,
@@ -390,22 +440,16 @@ async def screener_7b_node(state: AxiomState) -> dict:
             })
             continue
 
-        # Caso especial: empty-abstract short-circuit. Conserva route legacy
-        # "skip_no_abstract" para no romper el contrato hacia el writer.
-        if result.reason == "unavailable_full_text":
-            screened.append({
-                **paper,
-                "screening": {**result.model_dump(), "route": "skip_no_abstract"},
-            })
-            continue
-
-        # 7B decisivo (no requiere escalación) → emisión final con route="7b".
-        if not _should_escalate(result):
+        # Caso 3: el modelo decidió. Aplicar lógica de escalación normal.
+        # Si el modelo retornó `reason=unavailable_full_text` aquí (con
+        # abstract presente), `_should_escalate` lo capturará vía
+        # `confidence=low` o `decision=uncertain` y lo mandará al 32B.
+        if not _should_escalate(decision):
             screened_paper = {
                 **paper,
-                "screening": {**result.model_dump(), "route": "7b"},
+                "screening": {**decision.model_dump(), "route": "7b"},
             }
-            if result.decision == "exclude":
+            if decision.decision == "exclude":
                 excluded.append(screened_paper)
             else:
                 screened.append(screened_paper)
@@ -415,7 +459,7 @@ async def screener_7b_node(state: AxiomState) -> dict:
         # adjunto para usarlo como fallback si el 32B falla.
         to_escalate.append({
             **paper,
-            "_7b_decision": result.model_dump(),
+            "_7b_decision": decision.model_dump(),
         })
 
     logger.info(

@@ -8,7 +8,12 @@ from .extractor import run_extractor
 from .analyst_7b import analyst_7b_node
 from .analyst_32b import analyst_32b_node
 from .gap_finder import run_gap_finder
-from .writer import run_writer
+from .writer import (
+    writer_synthesis_node,
+    writer_tables_node,
+    writer_references_node,
+    writer_assembler_node,
+)
 
 __all__ = [
     "run_searcher",
@@ -18,5 +23,8 @@ __all__ = [
     "analyst_7b_node",
     "analyst_32b_node",
     "run_gap_finder",
-    "run_writer",
+    "writer_synthesis_node",
+    "writer_tables_node",
+    "writer_references_node",
+    "writer_assembler_node",
 ]

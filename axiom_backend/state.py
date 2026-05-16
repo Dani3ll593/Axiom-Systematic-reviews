@@ -60,8 +60,20 @@ class AxiomState(TypedDict, total=False):
     # ─── Agente 5: Gap Finder ───
     research_gaps: list[dict]
     
-    # ─── Agente 6: Writer ───
+    # ─── Agente 6: Writer (bifásico: synthesis → tables → references → assembler) ───
+    # Keys intermedias entre nodos del writer. Escritura atómica (cada nodo
+    # produce una sola key, los siguientes la consumen).
+    writer_synthesis_md:  str   # writer_synthesis (LLM) → writer_assembler
+    writer_tables_md:     str   # writer_tables (Python) → writer_assembler
+    writer_references_md: str   # writer_references (Python) → writer_assembler
+
+    # Output final: 1 solo reporte, producido por writer_assembler concatenando
+    # los 3 md anteriores y renderizando un PDF unificado.
     executive_report_md: str
-    apa7_literature_review: str
     executive_report_pdf_path: str | None
+
+    # DEPRECATED — conservados temporalmente para compatibilidad con consumidores
+    # downstream (axiom_api.py /apa7.pdf endpoint, etc). El refactor genera 1
+    # solo reporte; estos campos quedan en None tras un run exitoso.
+    apa7_literature_review: str
     apa7_pdf_path: str | None
