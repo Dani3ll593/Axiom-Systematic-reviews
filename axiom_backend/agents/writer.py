@@ -963,6 +963,25 @@ async def writer_references_node(state: AxiomState) -> dict:
         )
         return f'## {title}\n\n<div class="references">\n{entries}\n</div>\n'
 
+    n_inc = len(included)
+    n_res = len(restricted)
+
+    sections = [
+        _numbered_section(L["included_title"].format(n=n_inc), included),
+    ]
+    if restricted:
+        sections.append(
+            _numbered_section(L["restricted_title"].format(n=n_res), restricted)
+        )
+
+    references_md = "\n".join(sections)
+
+    logger.info(
+        "writer_references: %d incluidas, %d restringidas (%d chars)",
+        n_inc, n_res, len(references_md),
+    )
+
+    return {"writer_references_md": references_md}
 
 # ────────────────────────────────────────────────────────────────────────────
 # Nodo 4/4 — writer_assembler (Python puro, sin LLM)
