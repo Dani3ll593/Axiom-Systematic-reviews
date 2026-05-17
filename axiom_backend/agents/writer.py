@@ -686,20 +686,29 @@ def _build_apa7_full_entry(paper: dict) -> str:
     year = _normalize_year(paper.get("year"))
     title = (paper.get("title") or "Sin título").strip().rstrip(".")
     journal = (paper.get("journal") or paper.get("venue") or "").strip()
+    
+    # ¡Agregamos la extracción de las variables que faltaban!
+    journal = (paper.get("journal") or paper.get("venue") or "").strip()
+    volume = str(paper.get("volume") or "").strip()
+    issue = str(paper.get("issue") or "").strip()
+    pages = str(paper.get("pages") or "").strip()
     doi = (paper.get("doi") or "").strip()
 
     parts = [f"{authors} ({year}). {title}."]
+
     if journal:
-        j_str = f"<i>{journal}</i>"
+        journal_part = f"*{journal}*"
         if volume:
-            j_str += f", <i>{volume}</i>"
-        if issue:
-            j_str += f"({issue})"
+            journal_part += f", *{volume}*"
+            if issue:
+                journal_part += f"({issue})"
         if pages:
-            j_str += f", {pages}"
-        parts.append(j_str + ".")
+            journal_part += f", {pages}"
         
+        parts.append(journal_part + ".")
+
     if doi:
+        # Normalizar a https://doi.org/...
         if doi.startswith("http"):
             parts.append(doi)
         else:
@@ -802,6 +811,33 @@ _TABLE_LABELS = {
     },
 }
 
+_REASON_TRANSLATIONS = {
+    "English": {
+        "wrong_population": "Wrong population",
+        "wrong_intervention": "Wrong intervention",
+        "wrong_study_design": "Wrong study design",
+        "wrong_comparison": "Wrong comparison",
+        "wrong_outcomes": "Wrong outcomes",
+        "wrong_year": "Outside date range",
+        "wrong_language": "Wrong language",
+        "unavailable_full_text": "Full text unavailable",
+        "not_relevant": "Not relevant to research question",
+        "unspecified": "Unspecified reason"
+    },
+    "Spanish": {
+        "wrong_population": "Población incorrecta",
+        "wrong_intervention": "Intervención incorrecta",
+        "wrong_study_design": "Diseño de estudio incorrecto",
+        "wrong_comparison": "Comparador no aplica",
+        "wrong_outcomes": "Resultados no evaluados",
+        "wrong_year": "Fuera del rango de años",
+        "wrong_language": "Idioma excluido",
+        "unavailable_full_text": "Texto completo no disponible",
+        "not_relevant": "No relevante para la pregunta de investigación",
+        "unspecified": "Razón no especificada"
+    }
+}
+
 _REFERENCES_LABELS = {
     "English": {
         "included_title":   "References (included, n={n})",
@@ -814,7 +850,6 @@ _REFERENCES_LABELS = {
         "empty_section":    "_No hay artículos en esta categoría._",
     },
 }
-
 
 
 async def writer_tables_node(state: AxiomState) -> dict:
@@ -831,7 +866,9 @@ async def writer_tables_node(state: AxiomState) -> dict:
     extractions      = state.get("extractions", []) or []
     question         = state.get("question", "")
 
+    lang = _detect_language(question)
     L = _TABLE_LABELS.get(_detect_language(question), _TABLE_LABELS["English"])
+    R = _REASON_TRANSLATIONS.get(lang, _REASON_TRANSLATIONS["English"])
 
     references_table = _build_references_table(screened_papers)
     design_by_pid = {
@@ -855,8 +892,11 @@ async def writer_tables_node(state: AxiomState) -> dict:
     if papers_excluded:
         excluded_by_reason = Counter()
         for p in papers_excluded:
-            reason = (p.get("screening") or {}).get("reason") or "unspecified"
-            excluded_by_reason[reason] += 1
+            raw_reason = (p.get("screening") or {}).get("reason") or "unspecified"
+            # Traducir la razón, si no existe en el dict hace un fallback limpiando el snake_case
+            clean_reason = R.get(raw_reason, raw_reason.replace("_", " ").capitalize())
+            excluded_by_reason[clean_reason] += 1
+            
         excl_rows = [[r, str(n)] for r, n in excluded_by_reason.most_common()]
         excl_md = f"\n\n### {L['exclusion_reasons']}\n\n" + _md_table(
             [L["reason"], L["n"]], excl_rows,

@@ -33,7 +33,7 @@ Produce ONE markdown string with these **two** sections, in this order. Use head
 ## Executive Summary
 [1-2 paragraphs: research question, headline finding, scope of evidence. Keep this section concise.]
 
-## Comprehensive Synthesis of Findings
+## Synthesis of Findings
 [Write an extensive, deeply detailed section (multiple long paragraphs). Do not just state the consensus; dissect the evidence. Break down the clusters by detailing the individual papers within them. Expose specific studies: detail their methodologies, specific interventions, and precise outcomes. Where clusters disagree, explore the contradiction deeply using the contradiction quotes provided. Analyze why they might differ (e.g., different dosages, populations, or study designs).]
 ```
 
@@ -63,3 +63,11 @@ Your response MUST be in EXACTLY this structure. Start with `<think>`, close it,
 - Ensure the output is valid JSON. Do not manually double-escape newlines or quotes; output standard Markdown text naturally within the JSON string.
 - Output ONLY valid JSON between the `<json>` tags. No prose before `<think>` or after `</json>`.
 - DO NOT include a references list, tables, PRISMA flow, Discussion, Limitations, or Future Research in the markdown. Those are produced by separate downstream nodes.
+
+# 🛑 STRICT ANTI-REPETITION BOUNDARxIES (CRITICAL)
+- **YOUR SCOPE IS ONLY THE "WHAT":** You are strictly answering "What did the studies find?" and "How did they do it?". 
+- **NO INTERPRETATION:** DO NOT discuss the broader theoretical implications, practical applications, or real-world impact of these findings. Leave the "Why this matters" to the Discussion node.
+- **NO FUTURE RESEARCH:** DO NOT mention limitations of the studies, evidence gaps, or future research directions under any circumstances.
+- **NO REPETITION:** Assume the reader will read the Discussion immediately after your text. Keep your focus entirely on the empirical data, exact sample sizes, p-values, and direct study outcomes.
+- **ABSOLUTELY NO CONCLUSIONS:** Do NOT add a concluding paragraph. Do NOT summarize the findings at the end. When you finish detailing the last study, STOP generating text immediately. 
+- **BANNED HEADINGS:** You MUST NOT use headings like "Conclusion", "Discussion", "Summary", or "Implications". End abruptly after the last factual claim.

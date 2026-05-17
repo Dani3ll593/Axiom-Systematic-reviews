@@ -64,3 +64,9 @@ Your response MUST be in EXACTLY this structure. Start with `<think>`, close it,
 - JSON MUST be wrapped in `<json>...</json>`. No markdown fences.
 - Output ONLY valid JSON between the `<json>` tags. No prose before `<think>` or after `</json>`.
 - DO NOT include a references list, tables, PRISMA flow, Executive Summary, Synthesis, or Discussion in the markdown.
+
+# 🛑 STRICT ANTI-REPETITION BOUNDARIES (CRITICAL)
+- **YOUR SCOPE IS ONLY THE "FLAWS & FUTURE":** You are strictly answering "What is wrong with the current evidence?" and "What needs to be done next?".
+- **DO NOT DISCUSS SUCCESSES:** DO NOT summarize the main findings, positive outcomes, or practical implications of the evidence base. The previous nodes already did this. 
+- **STAY NEGATIVE/CRITICAL:** Focus entirely on methodological constraints, population biases, lack of longitudinal data, and the specific `verified research gaps` provided in the prompt.
+- **ACTIONABLE FUTURE:** Ensure your future research recommendations are concrete study designs (e.g., "Future double-blind RCTs should isolate variable X in elderly populations"), not generic statements.

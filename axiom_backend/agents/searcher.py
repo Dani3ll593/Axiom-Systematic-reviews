@@ -276,6 +276,11 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict]:
                 doi = (aid.text or "").strip()
                 break
 
+        journal = art.findtext(".//Journal/Title", default="") or art.findtext(".//MedlineTA", default="")  
+        volume = art.findtext(".//JournalIssue/Volume", default="")
+        issue = art.findtext(".//JournalIssue/Issue", default="")
+        pages = art.findtext(".//Pagination/MedlinePgn", default="")
+
         papers.append({
             "paper_id": f"pubmed:{pmid}",
             "source":   "pubmed",
@@ -284,6 +289,10 @@ def _parse_pubmed_xml(xml_text: str) -> list[dict]:
             "authors":  authors,
             "year":     year,
             "abstract": abstract,
+            "journal":  journal,
+            "volume":   volume,
+            "issue":    issue,
+            "pages":    pages,
         })
     return papers
 
@@ -308,6 +317,18 @@ async def _fetch_openalex(query: str) -> list[dict]:
         # OpenAlex serializa el abstract como inverted index — hay que reconstruir
         abstract = _reconstruct_abstract(w.get("abstract_inverted_index"))
         doi = (w.get("doi") or "").replace("https://doi.org/", "").lower()
+        
+        loc = w.get("primary_location") or {}
+        source = loc.get("source") or {}
+        journal = source.get("display_name") or ""
+    
+        biblio = w.get("biblio") or {}
+        volume = str(biblio.get("volume") or "")
+        issue = str(biblio.get("issue") or "")
+        fp = str(biblio.get("first_page") or "")
+        lp = str(biblio.get("last_page") or "")
+        pages = f"{fp}-{lp}" if fp and lp and fp != lp else (fp or lp)
+        
         papers.append({
             "paper_id": f"openalex:{w.get('id', '').rsplit('/', 1)[-1]}",
             "source":   "openalex",
@@ -317,6 +338,10 @@ async def _fetch_openalex(query: str) -> list[dict]:
                          for a in w.get("authorships", [])],
             "year":     str(w.get("publication_year", "")),
             "abstract": abstract,
+            "journal":  journal,
+            "volume":   volume,
+            "issue":    issue,
+            "pages":    pages,
         })
     return papers
 
@@ -370,6 +395,13 @@ def _parse_arxiv_atom(atom_text: str) -> list[dict]:
             (a.findtext("a:name", default="", namespaces=ns) or "").strip()
             for a in entry.findall("a:author", ns)
         ]
+
+        container = item.get("container-title") or []
+        journal = container[0] if container else ""
+        volume = str(item.get("volume") or "")
+        issue = str(item.get("issue") or "")
+        pages = str(item.get("page") or "")
+
         papers.append({
             "paper_id": f"arxiv:{arxiv_id}",
             "source":   "arxiv",
@@ -378,6 +410,10 @@ def _parse_arxiv_atom(atom_text: str) -> list[dict]:
             "authors":  [a for a in authors if a],
             "year":     year,
             "abstract": summary,
+            "journal":  journal,
+            "volume":   volume,
+            "issue":    issue,
+            "pages":    pages
         })
     return papers
 

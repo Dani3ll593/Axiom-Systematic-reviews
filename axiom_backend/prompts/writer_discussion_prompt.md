@@ -33,7 +33,7 @@ You MUST use a `<think>` block to plan before writing. In the audit, verify:
 Produce ONE markdown string with this **single** section. Use the heading level exactly as shown:
 
 ```
-## In-Depth Discussion
+## Discussion
 [Extensive interpretation of the findings across multiple long paragraphs. Connect the synthesis back to the original research question. Provide a granular analysis of methodological heterogeneity. Contrast the success/failure of different interventions. If Risk of Bias or GRADE certainty data is present, analyze how those biases affect the reliability of the findings. Discuss what the body of evidence collectively implies for theory and practice.]
 ```
 
@@ -62,3 +62,9 @@ Your response MUST be in EXACTLY this structure. Start with `<think>`, close it,
 - JSON MUST be wrapped in `<json>...</json>`. No markdown fences.
 - Output ONLY valid JSON between the `<json>` tags. No prose before `<think>` or after `</json>`.
 - DO NOT include a references list, tables, PRISMA flow, Executive Summary, Synthesis, Limitations, or Future Research in the markdown.
+
+# 🛑 STRICT ANTI-REPETITION BOUNDARIES (CRITICAL)
+- **YOUR SCOPE IS ONLY THE "WHY":** You are strictly answering "Why do these findings matter?" and "How do they fit together?".
+- **DO NOT RESUMMARIZE DATA:** Assume the reader literally just finished reading the Synthesis section. DO NOT waste tokens re-explaining the sample sizes, study designs, or basic findings. Instead, directly analyze the *meaning* of those findings.
+- **NO FUTURE RESEARCH OR LIMITATIONS:** DO NOT discuss what the field is missing, study flaws, or what future researchers should do. That is strictly the job of the subsequent Limitations node. 
+- **FOCUS ON SYNTHESIS & CONFLICT:** Spend your tokens explaining *why* certain studies contradict each other (e.g., differences in methodology, populations) and what this implies for current theory or clinical/practical guidelines.
