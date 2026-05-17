@@ -30,9 +30,9 @@ from axiom_backend.tools.llm_router import LLM_FEATHERLESS, featherless_credit, 
 logger = logging.getLogger(__name__)
 
 # --- Tunables ---
-MAX_CONCURRENT = 1   # Featherless Premium: 4 units totales con Qwen-7B (cost 1).
-LLM_TIMEOUT_S = 45.0
-MAX_INPUT_CHARS = 8000  # Truncation limit to prevent 7B context overflow
+MAX_CONCURRENT = 2   # Featherless Premium: 4 units totales con Qwen-7B (cost 1).
+LLM_TIMEOUT_S = 300.0
+MAX_INPUT_CHARS = 65000  # Truncation limit to prevent 7B context overflow
 
 # PDF fetch tunables — separados del LLM para no acoplar concurrencias
 PDF_DOWNLOAD_CONCURRENCY = 8

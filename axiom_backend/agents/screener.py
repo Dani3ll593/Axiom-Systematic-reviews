@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 # medir el budget global de units, no solo el del screener.
 MAX_CONCURRENT_7B = 1
 MAX_CONCURRENT_32B = 1
-LLM_TIMEOUT_S = 90.0
+LLM_TIMEOUT_S = 180.0
 ESCALATE_CONFIDENCES = {"low"}
 ESCALATE_DECISIONS = {"uncertain"}
 

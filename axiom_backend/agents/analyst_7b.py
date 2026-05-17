@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
  
 # --- Tunables ---
 MAX_CONCURRENT_CLUSTERS = 4
-TIMEOUT_S = 180.0
+TIMEOUT_S = 300.0
  
  
 def _prune_extraction(paper: dict) -> dict:

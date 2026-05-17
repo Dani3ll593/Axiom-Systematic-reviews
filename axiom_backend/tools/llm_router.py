@@ -55,6 +55,7 @@ LLM_FEATHERLESS = AsyncOpenAI(
     # Timeout generoso: DeepSeek-R1 con <think> puede tardar 60-180s por
     # llamada. Cada agente además impone su propio timeout vía asyncio.wait_for.
     timeout=300.0,
+    max_retries=3,
 )
 
 # Aliases legacy — TODOS apuntan al mismo cliente. La distinción entre
