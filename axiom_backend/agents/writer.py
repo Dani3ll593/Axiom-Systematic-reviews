@@ -697,9 +697,9 @@ def _build_apa7_full_entry(paper: dict) -> str:
     parts = [f"{authors} ({year}). {title}."]
 
     if journal:
-        journal_part = f"*{journal}*"
+        journal_part = f"<em>{journal}</em>"
         if volume:
-            journal_part += f", *{volume}*"
+            journal_part += f", <em>{volume}</em>"
             if issue:
                 journal_part += f"({issue})"
         if pages:
@@ -838,6 +838,21 @@ _REASON_TRANSLATIONS = {
     }
 }
 
+_CONSENSUS_TRANSLATIONS = {
+    "English": {
+        "full_agreement": "Full agreement",
+        "majority_agreement": "Majority agreement",
+        "mixed_results": "Mixed results",
+        "no_consensus": "No consensus",
+    },
+    "Spanish": {
+        "full_agreement": "Acuerdo total",
+        "majority_agreement": "Acuerdo mayoritario",
+        "mixed_results": "Resultados mixtos",
+        "no_consensus": "Sin consenso",
+    }
+}
+
 _REFERENCES_LABELS = {
     "English": {
         "included_title":   "References (included, n={n})",
@@ -907,14 +922,22 @@ async def writer_tables_node(state: AxiomState) -> dict:
         L["cluster"], L["core_claim"], L["n_papers"],
         L["agreement_pct"], L["consensus_level"], L["heterogeneity"], L["grade"],
     ]
+    
+    # Extraemos el diccionario de traducciones de consenso en el idioma adecuado
+    C = _CONSENSUS_TRANSLATIONS.get(lang, _CONSENSUS_TRANSLATIONS["English"])
+    
     cluster_rows = []
     for i, c in enumerate(consensus, start=1):
+        raw_consensus = c.get("consensus_level") or "—"
+        # Traducir. Fallback a limpiar el texto si no está en el diccionario.
+        clean_consensus = C.get(raw_consensus, raw_consensus.replace("_", " ").capitalize())
+        
         cluster_rows.append([
             f"C{i}",
             (c.get("core_claim") or "—"),
             str(c.get("total_papers_in_cluster") or "—"),
             str(c.get("agreement_percentage") or "—"),
-            (c.get("consensus_level") or "—"),
+            clean_consensus,  # <--- Usamos el texto limpio aquí
             L["yes"] if c.get("heterogeneity_detected") else L["no"],
             (c.get("grade_final_certainty") or L["not_assessed"]),
         ])
