@@ -63,9 +63,11 @@ class AxiomState(TypedDict, total=False):
     # ─── Agente 6: Writer (bifásico: synthesis → tables → references → assembler) ───
     # Keys intermedias entre nodos del writer. Escritura atómica (cada nodo
     # produce una sola key, los siguientes la consumen).
-    writer_synthesis_md:  str   # writer_synthesis (LLM) → writer_assembler
-    writer_tables_md:     str   # writer_tables (Python) → writer_assembler
-    writer_references_md: str   # writer_references (Python) → writer_assembler
+    writer_synthesis_md:   str   # writer_synthesis   (LLM) → writer_assembler
+    writer_discussion_md:  str   # writer_discussion  (LLM) → writer_assembler
+    writer_limitations_md: str   # writer_limitations (LLM) → writer_assembler
+    writer_tables_md:      str   # writer_tables     (Python) → writer_assembler
+    writer_references_md:  str   # writer_references (Python) → writer_assembler
 
     # Output final: 1 solo reporte, producido por writer_assembler concatenando
     # los 3 md anteriores y renderizando un PDF unificado.

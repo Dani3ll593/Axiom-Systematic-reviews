@@ -14,6 +14,8 @@ from axiom_backend.tools.reconciler import reconciler_node
 from axiom_backend.agents.gap_finder import run_gap_finder
 from axiom_backend.agents.writer import (
     writer_synthesis_node,
+    writer_discussion_node,
+    writer_limitations_node,
     writer_tables_node,
     writer_references_node,
     writer_assembler_node,
@@ -79,10 +81,12 @@ def build_axiom_graph():
     builder.add_node("reconciler", reconciler_node)
     builder.add_node("grade_profiler", run_grade_profiler)    # Cochrane only
     builder.add_node("gapfinder", run_gap_finder)
-    builder.add_node("writer_synthesis",  writer_synthesis_node)
-    builder.add_node("writer_tables",     writer_tables_node)
-    builder.add_node("writer_references", writer_references_node)
-    builder.add_node("writer_assembler",  writer_assembler_node)
+    builder.add_node("writer_synthesis",   writer_synthesis_node)
+    builder.add_node("writer_discussion",  writer_discussion_node)    
+    builder.add_node("writer_limitations", writer_limitations_node)   
+    builder.add_node("writer_tables",      writer_tables_node)
+    builder.add_node("writer_references",  writer_references_node)
+    builder.add_node("writer_assembler",   writer_assembler_node)
 
     # 2. Definir Aristas (Flujo)
     builder.add_edge(START, "searcher")
@@ -120,10 +124,12 @@ def build_axiom_graph():
     # Cadena del writer (Paso B completo): synthesis (LLM) → tables (Python) →
     # references (Python) → assembler (Python). Cada nodo escribe su key
     # intermedia en el state; el assembler concatena los 3 y produce 1 PDF.
-    builder.add_edge("writer_synthesis",  "writer_tables")
-    builder.add_edge("writer_tables",     "writer_references")
-    builder.add_edge("writer_references", "writer_assembler")
-    builder.add_edge("writer_assembler",  END)
+    builder.add_edge("writer_synthesis",   "writer_discussion")
+    builder.add_edge("writer_discussion",  "writer_limitations")
+    builder.add_edge("writer_limitations", "writer_tables")
+    builder.add_edge("writer_tables",      "writer_references")
+    builder.add_edge("writer_references",  "writer_assembler")
+    builder.add_edge("writer_assembler",   END)
 
     return builder.compile()
 

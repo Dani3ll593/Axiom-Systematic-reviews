@@ -12,7 +12,12 @@ from pydantic import BaseModel, ValidationError
 from axiom_backend.state import AxiomState
 from axiom_backend.config import settings
 from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response, featherless_credit, COST_32B
-from axiom_backend.prompts import WRITER_SYNTHESIS_PROMPT, WRITER_APA7_RULES
+from axiom_backend.prompts import (
+    WRITER_SYNTHESIS_PROMPT,
+    WRITER_DISCUSSION_PROMPT,
+    WRITER_LIMITATIONS_PROMPT,
+    WRITER_APA7_RULES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +35,12 @@ REPORTS_DIR = Path("data/results")
 # writer_references_node (Python puro).
 class SynthesisOutput(BaseModel):
     synthesis_md: str
+
+class DiscussionOutput(BaseModel):
+    discussion_md: str
+
+class LimitationsOutput(BaseModel):
+    limitations_md: str
 
 
 # ============================================================================
@@ -209,25 +220,23 @@ def _build_prisma_flow(
 # ============================================================================
 # Helpers — Llamada a QwQ-32B con un reintento (espejo del patrón en gap_finder)
 # ============================================================================
-async def _call_qwq_with_retry(system_prompt: str, user_msg: str) -> "SynthesisOutput":
-    """Llama al writer (synthesis) y, si la respuesta no parsea o no valida, reintenta una vez.
+async def _call_qwq_with_retry(
+    system_prompt: str,
+    user_msg: str,
+    output_class: type[BaseModel] = SynthesisOutput,
+    node_label: str = "writer_synthesis",
+) -> BaseModel:
+    """Llama a un nodo writer (synthesis | discussion | limitations) y, si la
+    respuesta no parsea o no valida, reintenta una vez con temperatura distinta.
 
-    QwQ-32B / DeepSeek-R1-Distill es errático: a veces ignora las tags
-    <json>...</json> y emite prosa narrativa ("Alright, I've got this task..."),
-    o un JSON con campos faltantes. Un solo reintento con temperatura distinta
-    suele bastar — la varianza del modelo es alta entre llamadas aunque el
-    prompt sea idéntico.
-
-    Fix R1 (`content or reasoning`): Featherless separa el output del modelo
-    en dos campos cuando el modelo es R1-style — el reasoning (incluido el
-    bloque <json>) va a `message.reasoning` y `message.content` queda vacío.
-    Sin este fallback, el parser ve "" y tira ValueError. Mismo fix aplicado
-    en screener_32b.
+    Generalizado tras el refactor 3-nodos: cada nodo de prosa pasa su propio
+    `output_class` (SynthesisOutput / DiscussionOutput / LimitationsOutput) y
+    `node_label` (para los logs). El resto del comportamiento es idéntico al
+    helper original — incluyendo el fallback `content or reasoning` para R1.
     """
     last_err: Exception | None = None
     for attempt, temperature in ((1, 0.3), (2, 0.55)):
         try:
-            # Cap global de Featherless: writer synthesis usa 32B (cost=2).
             async with featherless_credit(cost=COST_32B):
                 response = await asyncio.wait_for(
                     LLM_32B.chat.completions.create(
@@ -244,7 +253,7 @@ async def _call_qwq_with_retry(system_prompt: str, user_msg: str) -> "SynthesisO
             msg = response.choices[0].message
             raw_text = msg.content or getattr(msg, "reasoning", None) or ""
             parsed_json = extract_json_from_response(raw_text)
-            return SynthesisOutput(**parsed_json)
+            return output_class(**parsed_json)
         except (json.JSONDecodeError, ValidationError, ValueError) as e:
             last_err = e
             if attempt == 1:
@@ -455,30 +464,25 @@ def _generate_apa7_pdf(apa_text: str, sr_id: str, question: str) -> Path | None:
 # Paso A (este archivo): solo writer_synthesis_node implementado.
 # Paso B: writer_tables_node, writer_references_node, writer_assembler_node.
 # ============================================================================
-async def writer_synthesis_node(state: AxiomState) -> dict:
-    """Nodo 1/4 del writer: genera prosa académica cohesiva (synthesis_md).
 
-    Input del state:
-      - consensus_clusters, research_gaps, screened_papers, papers_excluded,
-        question, sr_id.
-    Output del state:
-      - writer_synthesis_md: markdown con secciones Executive Summary,
-        Synthesis of Findings, Discussion, Limitations, Future Research.
+def _build_writer_payload(state: AxiomState) -> tuple[dict, dict, str]:
+    """Construye el payload que comparten los 3 nodos de prosa.
 
-    NO produce PDF, NO produce references list, NO produce tablas. Esas
-    salidas son responsabilidad de los nodos downstream del writer.
+    Devuelve:
+      - payload         : dict con question, consensus_findings, gaps, references_table
+      - references_table: {paper_id: short-form citation} (también útil downstream)
+      - output_language : 'English' o 'Spanish' detectado de la pregunta
+
+    Centralizado para que los 3 nodos LLM compartan exactamente el mismo input
+    (mismo references_table, misma estructura, mismo idioma).
     """
     screened_papers = state.get("screened_papers", [])
     consensus       = state.get("consensus_clusters", [])
     gaps            = state.get("research_gaps", [])
     question        = state.get("question", "Pregunta no definida")
 
-    # references_table sigue construyéndose aquí porque el synthesis necesita
-    # las citas inline. La lista APA 7 completa la arma writer_references_node
-    # con sus propios helpers; este dict es solo {paper_id: cita-short}.
     references_table = _build_references_table(screened_papers)
 
-    # Condensar consensos al payload mínimo que el prompt necesita.
     consensus_findings = [
         {
             "claim":                c.get("core_claim"),
@@ -499,40 +503,129 @@ async def writer_synthesis_node(state: AxiomState) -> dict:
         "references_table":   references_table,
     }
 
-    output_language = _detect_language(question)
+    return payload, references_table, _detect_language(question)
+
+
+async def writer_synthesis_node(state: AxiomState) -> dict:
+    """Nodo 1/6 del writer: genera Executive Summary + Synthesis of Findings.
+
+    Output del state:
+      - writer_synthesis_md: markdown con secciones Executive Summary y
+        Comprehensive Synthesis of Findings (NO Discussion, NO Limitations,
+        NO Future Research — esos están en writer_discussion / writer_limitations).
+    """
+    payload, _, output_language = _build_writer_payload(state)
+
     logger.info("writer_synthesis: idioma detectado = %s", output_language)
     system_prompt = (
         WRITER_SYNTHESIS_PROMPT
         .replace("{apa7_rules_text}", WRITER_APA7_RULES)
         .replace("{output_language}", output_language)
     )
-
     user_msg = f"SYNTHESIS PAYLOAD:\n{json.dumps(payload, ensure_ascii=False)}"
 
     logger.info(
         "writer_synthesis: %d incluidos, %d gaps, %d clusters",
-        len(screened_papers), len(gaps), len(consensus),
+        len(state.get("screened_papers", [])),
+        len(state.get("research_gaps", [])),
+        len(state.get("consensus_clusters", [])),
     )
 
     try:
-        validated = await _call_qwq_with_retry(system_prompt, user_msg)
+        validated = await _call_qwq_with_retry(
+            system_prompt, user_msg, SynthesisOutput, "writer_synthesis",
+        )
         logger.info(
-            "writer_synthesis: ¡Prosa generada con éxito! (%d chars)",
+            "writer_synthesis: prosa generada (%d chars)",
             len(validated.synthesis_md),
         )
         return {"writer_synthesis_md": validated.synthesis_md}
-
     except ValidationError as e:
-        logger.error("writer_synthesis: Pydantic validation error tras reintento: %s", e)
+        logger.error("writer_synthesis: validation_error tras reintento: %s", e)
         return {
             "writer_synthesis_md": "",
             "errors": [{"node": "writer_synthesis", "error": f"validation_error: {e}"}],
         }
     except Exception as e:
-        logger.exception("writer_synthesis: Fallo en la generación tras reintento")
+        logger.exception("writer_synthesis: fallo tras reintento")
         return {
             "writer_synthesis_md": "",
             "errors": [{"node": "writer_synthesis", "error": str(e)}],
+        }
+
+async def writer_discussion_node(state: AxiomState) -> dict:
+    """Nodo 2/6 del writer: genera In-Depth Discussion (solo).
+
+    Recibe el mismo payload que synthesis pero un prompt distinto enfocado en
+    INTERPRETAR la evidencia (no re-describirla). Output: writer_discussion_md.
+    """
+    payload, _, output_language = _build_writer_payload(state)
+
+    system_prompt = (
+        WRITER_DISCUSSION_PROMPT
+        .replace("{apa7_rules_text}", WRITER_APA7_RULES)
+        .replace("{output_language}", output_language)
+    )
+    user_msg = f"DISCUSSION PAYLOAD:\n{json.dumps(payload, ensure_ascii=False)}"
+
+    try:
+        validated = await _call_qwq_with_retry(
+            system_prompt, user_msg, DiscussionOutput, "writer_discussion",
+        )
+        logger.info(
+            "writer_discussion: prosa generada (%d chars)",
+            len(validated.discussion_md),
+        )
+        return {"writer_discussion_md": validated.discussion_md}
+    except ValidationError as e:
+        logger.error("writer_discussion: validation_error tras reintento: %s", e)
+        return {
+            "writer_discussion_md": "",
+            "errors": [{"node": "writer_discussion", "error": f"validation_error: {e}"}],
+        }
+    except Exception as e:
+        logger.exception("writer_discussion: fallo tras reintento")
+        return {
+            "writer_discussion_md": "",
+            "errors": [{"node": "writer_discussion", "error": str(e)}],
+        }
+
+
+async def writer_limitations_node(state: AxiomState) -> dict:
+    """Nodo 3/6 del writer: genera Limitations + Future Research Directions.
+
+    Mismo payload que los demás; prompt enfocado en boundaries de la evidencia
+    y recomendaciones derivadas de los verified_gaps. Output: writer_limitations_md.
+    """
+    payload, _, output_language = _build_writer_payload(state)
+
+    system_prompt = (
+        WRITER_LIMITATIONS_PROMPT
+        .replace("{apa7_rules_text}", WRITER_APA7_RULES)
+        .replace("{output_language}", output_language)
+    )
+    user_msg = f"LIMITATIONS PAYLOAD:\n{json.dumps(payload, ensure_ascii=False)}"
+
+    try:
+        validated = await _call_qwq_with_retry(
+            system_prompt, user_msg, LimitationsOutput, "writer_limitations",
+        )
+        logger.info(
+            "writer_limitations: prosa generada (%d chars)",
+            len(validated.limitations_md),
+        )
+        return {"writer_limitations_md": validated.limitations_md}
+    except ValidationError as e:
+        logger.error("writer_limitations: validation_error tras reintento: %s", e)
+        return {
+            "writer_limitations_md": "",
+            "errors": [{"node": "writer_limitations", "error": f"validation_error: {e}"}],
+        }
+    except Exception as e:
+        logger.exception("writer_limitations: fallo tras reintento")
+        return {
+            "writer_limitations_md": "",
+            "errors": [{"node": "writer_limitations", "error": str(e)}],
         }
 
 
@@ -624,60 +717,147 @@ def _md_table(header: list[str], rows: list[list[str]]) -> str:
 # ────────────────────────────────────────────────────────────────────────────
 # Nodo 2/4 — writer_tables (Python puro, sin LLM)
 # ────────────────────────────────────────────────────────────────────────────
+
+# ────────────────────────────────────────────────────────────────────────────
+# i18n — labels traducibles para tablas y secciones de references
+# ────────────────────────────────────────────────────────────────────────────
+# Mantener sincronizado con _detect_language(). Si en el futuro se agregan
+# idiomas (PT, FR…), agregar la entrada acá y en el detector.
+
+
+_TABLE_LABELS = {
+    "English": {
+        "prisma_flow_title":     "PRISMA Flow",
+        "stage":                 "Stage",
+        "n":                     "n",
+        "records_identified":    "Records identified",
+        "records_screened":      "Records screened",
+        "records_included":      "Records included",
+        "records_excluded":      "Records excluded",
+        "restricted_papers":     "Restricted access papers",
+        "exclusion_reasons":     "Exclusion reasons",
+        "reason":                "Reason",
+        "cluster_summary_title": "Cluster Summary",
+        "cluster":               "Cluster",
+        "core_claim":            "Core claim",
+        "n_papers":              "n papers",
+        "agreement_pct":         "Agreement (%)",
+        "consensus_level":       "Consensus level",
+        "heterogeneity":         "Heterogeneity",
+        "grade":                 "GRADE",
+        "yes":                   "Yes",
+        "no":                    "No",
+        "not_assessed":          "not assessed",
+        "papers_by_cluster":     "Papers by Cluster",
+        "citation":              "Citation",
+        "position":              "Position",
+        "year":                  "Year",
+        "study_design":          "Study design",
+        "supports":              "Supports",
+        "contradicts":           "Contradicts",
+        "neutral":               "Neutral",
+        "no_clusters":           "_No clusters formed._",
+        "no_papers_in_clusters": "_No papers in any cluster._",
+    },
+    "Spanish": {
+        "prisma_flow_title":     "Flujo PRISMA",
+        "stage":                 "Etapa",
+        "n":                     "n",
+        "records_identified":    "Registros identificados",
+        "records_screened":      "Registros cribados",
+        "records_included":      "Registros incluidos",
+        "records_excluded":      "Registros excluidos",
+        "restricted_papers":     "Artículos de acceso restringido",
+        "exclusion_reasons":     "Razones de exclusión",
+        "reason":                "Razón",
+        "cluster_summary_title": "Resumen de clusters",
+        "cluster":               "Cluster",
+        "core_claim":            "Afirmación principal",
+        "n_papers":              "n artículos",
+        "agreement_pct":         "Acuerdo (%)",
+        "consensus_level":       "Nivel de consenso",
+        "heterogeneity":         "Heterogeneidad",
+        "grade":                 "GRADE",
+        "yes":                   "Sí",
+        "no":                    "No",
+        "not_assessed":          "no evaluado",
+        "papers_by_cluster":     "Artículos por cluster",
+        "citation":              "Cita",
+        "position":              "Posición",
+        "year":                  "Año",
+        "study_design":          "Diseño del estudio",
+        "supports":              "Respalda",
+        "contradicts":           "Contradice",
+        "neutral":               "Neutral",
+        "no_clusters":           "_No se formaron clusters._",
+        "no_papers_in_clusters": "_No hay artículos en ningún cluster._",
+    },
+}
+
+_REFERENCES_LABELS = {
+    "English": {
+        "included_title":   "References (included, n={n})",
+        "restricted_title": "References — restricted access (n={n})",
+        "empty_section":    "_No papers in this category._",
+    },
+    "Spanish": {
+        "included_title":   "Referencias (incluidas, n={n})",
+        "restricted_title": "Referencias — acceso restringido (n={n})",
+        "empty_section":    "_No hay artículos en esta categoría._",
+    },
+}
+
+
+
 async def writer_tables_node(state: AxiomState) -> dict:
-    """Construye 3 tablas en Markdown:
+    """Construye las 3 tablas en Markdown, localizadas al idioma de la pregunta.
 
-      1. PRISMA Flow: encontrados / decididos / incluidos / excluidos / restringidos
-      2. Resumen de clusters: una fila por cluster con claim, n, %, GRADE
-      3. Papers por cluster: una fila por paper con cluster #, citación, posición, etc.
-
-    Output: `writer_tables_md` (string Markdown con las 3 tablas).
-
-    Sin LLM — los datos ya están estructurados en `consensus_clusters` y
-    `extractions`. Generar esto en Python es determinístico, gratis y
-    100% confiable.
+    Headers y títulos de sección se toman de _TABLE_LABELS según
+    _detect_language(question). El contenido (citas, claims, GRADE values) NO
+    se traduce — son strings emitidos por el pipeline upstream.
     """
-    papers_found    = state.get("papers_found", []) or []
-    screened_papers = state.get("screened_papers", []) or []
-    papers_excluded = state.get("papers_excluded", []) or []
-    consensus       = state.get("consensus_clusters", []) or []
-    extractions     = state.get("extractions", []) or []
+    consensus        = state.get("consensus_clusters", []) or []
+    papers_found     = state.get("papers_found", []) or []
+    screened_papers  = state.get("screened_papers", []) or []
+    papers_excluded  = state.get("papers_excluded", []) or []
+    extractions      = state.get("extractions", []) or []
+    question         = state.get("question", "")
+
+    L = _TABLE_LABELS.get(_detect_language(question), _TABLE_LABELS["English"])
 
     references_table = _build_references_table(screened_papers)
-    prisma_flow = _build_prisma_flow(papers_found, screened_papers, papers_excluded)
-    restricted = _build_restricted_list(screened_papers)
-
-    # Lookup auxiliar: study_design por paper_id (desde extractions)
     design_by_pid = {
-        e.get("paper_id"): (e.get("study_design") or "—")
+        (e.get("paper_id") if isinstance(e, dict) else getattr(e, "paper_id", None)):
+        (e.get("study_design") if isinstance(e, dict) else getattr(e, "study_design", None)) or "—"
         for e in extractions
     }
 
-    # ── Tabla 1: PRISMA flow ───────────────────────────────────────────────
+    # ── Tabla 1: PRISMA Flow ───────────────────────────────────────────────
+    restricted_n = sum(1 for p in screened_papers if not p.get("is_open"))
     flow_rows = [
-        ["Records identified",       prisma_flow["found"]],
-        ["Records screened",         prisma_flow["found"]],
-        ["Records included",         prisma_flow["included"]],
-        ["Records excluded",         prisma_flow["excluded_total"]],
-        ["Restricted access papers", len(restricted)],
+        [L["records_identified"], str(len(papers_found))],
+        [L["records_screened"],   str(len(papers_found))],
+        [L["records_included"],   str(len(screened_papers))],
+        [L["records_excluded"],   str(len(papers_excluded))],
+        [L["restricted_papers"],  str(restricted_n)],
     ]
-    flow_md = _md_table(["Stage", "n"], [[r[0], str(r[1])] for r in flow_rows])
+    flow_md = _md_table([L["stage"], L["n"]], flow_rows)
 
-    # Sub-tabla: exclusiones por razón (solo si hay datos)
-    excl_by_reason = prisma_flow["excluded_by_reason"]
     excl_md = ""
-    if excl_by_reason:
-        excl_rows = [[r, str(n)] for r, n in sorted(
-            excl_by_reason.items(), key=lambda kv: -kv[1]
-        )]
-        excl_md = "\n\n### Exclusion reasons\n\n" + _md_table(
-            ["Reason", "n"], excl_rows,
+    if papers_excluded:
+        excluded_by_reason = Counter()
+        for p in papers_excluded:
+            reason = (p.get("screening") or {}).get("reason") or "unspecified"
+            excluded_by_reason[reason] += 1
+        excl_rows = [[r, str(n)] for r, n in excluded_by_reason.most_common()]
+        excl_md = f"\n\n### {L['exclusion_reasons']}\n\n" + _md_table(
+            [L["reason"], L["n"]], excl_rows,
         )
 
     # ── Tabla 2: resumen de clusters ───────────────────────────────────────
     cluster_header = [
-        "Cluster", "Core claim", "n papers",
-        "Agreement (%)", "Consensus level", "Heterogeneity", "GRADE",
+        L["cluster"], L["core_claim"], L["n_papers"],
+        L["agreement_pct"], L["consensus_level"], L["heterogeneity"], L["grade"],
     ]
     cluster_rows = []
     for i, c in enumerate(consensus, start=1):
@@ -687,56 +867,42 @@ async def writer_tables_node(state: AxiomState) -> dict:
             str(c.get("total_papers_in_cluster") or "—"),
             str(c.get("agreement_percentage") or "—"),
             (c.get("consensus_level") or "—"),
-            "Yes" if c.get("heterogeneity_detected") else "No",
-            (c.get("grade_final_certainty") or "not assessed"),
+            L["yes"] if c.get("heterogeneity_detected") else L["no"],
+            (c.get("grade_final_certainty") or L["not_assessed"]),
         ])
-    clusters_md = _md_table(cluster_header, cluster_rows) if cluster_rows else "_No clusters formed._"
+    clusters_md = _md_table(cluster_header, cluster_rows) if cluster_rows else L["no_clusters"]
 
     # ── Tabla 3: papers por cluster ────────────────────────────────────────
-    paper_header = ["Cluster", "Citation", "Position", "Year", "Study design"]
+    paper_header = [L["cluster"], L["citation"], L["position"], L["year"], L["study_design"]]
     paper_rows = []
     for i, c in enumerate(consensus, start=1):
-        # Cada paper aparece en una de tres categorías
         for pid in (c.get("supporting_papers") or []):
-            paper_rows.append([
-                f"C{i}",
-                references_table.get(pid, pid),
-                "Supports",
-                _extract_year_from_citation(references_table.get(pid, "")),
-                design_by_pid.get(pid, "—"),
-            ])
+            paper_rows.append([f"C{i}", references_table.get(pid, pid), L["supports"],
+                               _extract_year_from_citation(references_table.get(pid, "")),
+                               design_by_pid.get(pid, "—")])
         for pid in (c.get("contradicting_papers") or []):
-            paper_rows.append([
-                f"C{i}",
-                references_table.get(pid, pid),
-                "Contradicts",
-                _extract_year_from_citation(references_table.get(pid, "")),
-                design_by_pid.get(pid, "—"),
-            ])
+            paper_rows.append([f"C{i}", references_table.get(pid, pid), L["contradicts"],
+                               _extract_year_from_citation(references_table.get(pid, "")),
+                               design_by_pid.get(pid, "—")])
         for pid in (c.get("neutral_papers") or []):
-            paper_rows.append([
-                f"C{i}",
-                references_table.get(pid, pid),
-                "Neutral",
-                _extract_year_from_citation(references_table.get(pid, "")),
-                design_by_pid.get(pid, "—"),
-            ])
-    papers_md = _md_table(paper_header, paper_rows) if paper_rows else "_No papers in any cluster._"
+            paper_rows.append([f"C{i}", references_table.get(pid, pid), L["neutral"],
+                               _extract_year_from_citation(references_table.get(pid, "")),
+                               design_by_pid.get(pid, "—")])
+    papers_md = _md_table(paper_header, paper_rows) if paper_rows else L["no_papers_in_clusters"]
 
-    # ── Ensamble del bloque completo de tablas ─────────────────────────────
     tables_md = (
-        "## PRISMA Flow\n\n"
+        f"## {L['prisma_flow_title']}\n\n"
         f"{flow_md}"
         f"{excl_md}\n\n"
-        "## Cluster Summary\n\n"
+        f"## {L['cluster_summary_title']}\n\n"
         f"{clusters_md}\n\n"
-        "## Papers by Cluster\n\n"
+        f"## {L['papers_by_cluster']}\n\n"
         f"{papers_md}\n"
     )
 
     logger.info(
-        "writer_tables: 3 tablas generadas | flow=%d stages | clusters=%d | rows_papers=%d",
-        len(flow_rows), len(cluster_rows), len(paper_rows),
+        "writer_tables: 3 tablas generadas | lang=%s | flow=%d | clusters=%d | rows_papers=%d",
+        _detect_language(question), len(flow_rows), len(cluster_rows), len(paper_rows),
     )
     return {"writer_tables_md": tables_md}
 
@@ -754,48 +920,52 @@ def _extract_year_from_citation(citation: str) -> str:
 # Nodo 3/4 — writer_references (Python puro, sin LLM)
 # ────────────────────────────────────────────────────────────────────────────
 async def writer_references_node(state: AxiomState) -> dict:
-    """Construye la lista de referencias APA 7 separada en dos secciones:
+    """Construye la lista de referencias APA 7, numerada y separada en dos
+    secciones (incluidas / acceso restringido). La numeración REINICIA en cada
+    sección. Títulos localizados al idioma de la pregunta.
 
-      - "References (included)": papers OA o accesibles que efectivamente
-        formaron parte del análisis.
-      - "References (restricted access)": papers relevantes pero detrás de
-        paywall. Se listan para auditoría PRISMA.
-
-    Ordenadas alfabéticamente por primer autor, formato hanging indent
-    (aplicado en CSS via `.references p`).
+    El hanging indent (sangría francesa) sigue aplicándose vía CSS sobre
+    `.references p` — cada entrada se emite como párrafo prefijado con
+    `1.  `, `2.  `, etc., para que el indent funcione sin necesidad de <ol>.
     """
     screened = state.get("screened_papers", []) or []
+    question = state.get("question", "")
+    L = _REFERENCES_LABELS.get(_detect_language(question), _REFERENCES_LABELS["English"])
 
-    included    = [p for p in screened if p.get("is_open")]
-    restricted  = [p for p in screened if not p.get("is_open")]
+    included   = [p for p in screened if p.get("is_open")]
+    restricted = [p for p in screened if not p.get("is_open")]
 
     def _sort_key(p: dict) -> str:
-        """Primer autor en minúsculas para ordenar alfabéticamente."""
         authors = p.get("authors") or []
         if not authors:
-            return "zzz"  # sin autor → al final
+            return "zzz"
         return _last_name(authors[0]).lower()
 
     included.sort(key=_sort_key)
     restricted.sort(key=_sort_key)
 
-    def _section(title: str, papers: list[dict]) -> str:
+    def _numbered_section(title: str, papers: list[dict]) -> str:
         if not papers:
-            return f"## {title}\n\n_No papers in this category._\n"
-        entries = "\n\n".join(_build_apa7_full_entry(p) for p in papers)
-        # El wrapper <div class="references"> hace que el CSS aplique
-        # hanging indent (text-indent: -1.27cm + padding-left: 1.27cm).
+            return f"## {title}\n\n{L['empty_section']}\n"
+        # Cada entry prefijada con `N. ` para numeración con reinicio por sección.
+        entries = "\n\n".join(
+            f"{i}.  {_build_apa7_full_entry(p)}"
+            for i, p in enumerate(papers, start=1)
+        )
         return f'## {title}\n\n<div class="references">\n\n{entries}\n\n</div>\n'
 
+    included_title   = L["included_title"].format(n=len(included))
+    restricted_title = L["restricted_title"].format(n=len(restricted))
+
     refs_md = (
-        _section(f"References (included, n={len(included)})", included)
+        _numbered_section(included_title, included)
         + "\n"
-        + _section(f"References — restricted access (n={len(restricted)})", restricted)
+        + _numbered_section(restricted_title, restricted)
     )
 
     logger.info(
-        "writer_references: %d incluidas, %d restringidas",
-        len(included), len(restricted),
+        "writer_references: %d incluidas, %d restringidas | lang=%s",
+        len(included), len(restricted), _detect_language(question),
     )
     return {"writer_references_md": refs_md}
 
@@ -816,48 +986,29 @@ async def writer_references_node(state: AxiomState) -> dict:
 # "Discussion". Si el corte no es identificable, fallback: tablas van al final
 # antes de references.
 # ────────────────────────────────────────────────────────────────────────────
-def _split_synthesis_for_assembly(synthesis_md: str) -> tuple[str, str]:
-    """Divide synthesis en (early_sections, late_sections).
 
-    early_sections  = Executive Summary + Synthesis of Findings
-    late_sections   = Discussion + Limitations + Future Research
-
-    El corte se hace en el primer `## Discussion` (o variante en español).
-    Si no se encuentra, devolvemos todo el synthesis como `early` y un
-    string vacío como `late` — las tablas terminarán al final.
-    """
-    if not synthesis_md:
-        return "", ""
-
-    # Patrones de corte en ambos idiomas
-    cut_patterns = [
-        r"\n##\s+Discussion\b",
-        r"\n##\s+Discusión\b",
-        r"\n##\s+Discussion and",
-        r"\n##\s+Discusión y",
-    ]
-    for pattern in cut_patterns:
-        match = re.search(pattern, synthesis_md, flags=re.IGNORECASE)
-        if match:
-            return synthesis_md[: match.start()], synthesis_md[match.start():]
-    # No se encontró corte → todo es early, late vacío
-    return synthesis_md, ""
-
+# REEMPLAZA TODO writer_assembler_node POR:
 
 async def writer_assembler_node(state: AxiomState) -> dict:
-    """Concatena los 3 markdown intermedios y produce 1 PDF unificado.
+    """Concatena los 5 markdown intermedios en orden y produce 1 PDF unificado.
 
-    Output del state:
-      - `executive_report_md`:        markdown completo del documento final
-      - `executive_report_pdf_path`:  ruta al PDF generado (str | None)
+    Orden final del documento:
+      1. Title page (meta_block en HTML)
+      2. Executive Summary + Synthesis of Findings  (writer_synthesis_md)
+      3. Tables                                      (writer_tables_md)
+      4. In-Depth Discussion                         (writer_discussion_md)
+      5. Limitations + Future Research               (writer_limitations_md)
+      6. References (incluidas + restringidas)       (writer_references_md)
 
-    Si alguno de los markdown intermedios viene vacío (porque su nodo falló),
-    se reemplaza por un placeholder marcado claramente para que el lector vea
+    Si algún markdown intermedio viene vacío (porque su nodo falló), se
+    reemplaza por un placeholder marcado claramente para que el lector vea
     que esa sección falló pero el documento sigue siendo entregable.
     """
-    synthesis_md  = state.get("writer_synthesis_md")  or ""
-    tables_md     = state.get("writer_tables_md")     or ""
-    references_md = state.get("writer_references_md") or ""
+    synthesis_md   = state.get("writer_synthesis_md")   or ""
+    discussion_md  = state.get("writer_discussion_md")  or ""
+    limitations_md = state.get("writer_limitations_md") or ""
+    tables_md      = state.get("writer_tables_md")      or ""
+    references_md  = state.get("writer_references_md")  or ""
 
     # Placeholders para secciones que fallaron upstream
     if not synthesis_md.strip():
@@ -865,6 +1016,16 @@ async def writer_assembler_node(state: AxiomState) -> dict:
             "## Synthesis of Findings\n\n"
             "_⚠ Synthesis section unavailable — the synthesis node failed. "
             "See errors in the run log._\n"
+        )
+    if not discussion_md.strip():
+        discussion_md = (
+            "## In-Depth Discussion\n\n"
+            "_⚠ Discussion section unavailable — the discussion node failed._\n"
+        )
+    if not limitations_md.strip():
+        limitations_md = (
+            "## Limitations of the Evidence Base\n\n"
+            "_⚠ Limitations section unavailable — the limitations node failed._\n"
         )
     if not tables_md.strip():
         tables_md = (
@@ -877,22 +1038,20 @@ async def writer_assembler_node(state: AxiomState) -> dict:
             "_⚠ References list unavailable — no screened papers._\n"
         )
 
-    # Partir la prosa para intercalar las tablas
-    synthesis_early, synthesis_late = _split_synthesis_for_assembly(synthesis_md)
-
-    # Orden final
     combined_md = (
-        synthesis_early.rstrip()
+        synthesis_md.rstrip()
         + "\n\n---\n\n"
         + tables_md.rstrip()
         + "\n\n---\n\n"
-        + (synthesis_late.rstrip() + "\n\n---\n\n" if synthesis_late else "")
+        + discussion_md.rstrip()
+        + "\n\n---\n\n"
+        + limitations_md.rstrip()
+        + "\n\n---\n\n"
         + references_md.rstrip()
         + "\n"
     )
 
-    # Renderizar PDF
-    sr_id = state.get("sr_id", "unknown")
+    sr_id    = state.get("sr_id", "unknown")
     question = state.get("question", "Pregunta no definida")
     cochrane = state.get("cochrane_mode", False)
 

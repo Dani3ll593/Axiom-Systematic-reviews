@@ -10,6 +10,8 @@ from .analyst_32b import analyst_32b_node
 from .gap_finder import run_gap_finder
 from .writer import (
     writer_synthesis_node,
+    writer_discussion_node,
+    writer_limitations_node,
     writer_tables_node,
     writer_references_node,
     writer_assembler_node,
@@ -24,6 +26,8 @@ __all__ = [
     "analyst_32b_node",
     "run_gap_finder",
     "writer_synthesis_node",
+    "writer_discussion_node",     
+    "writer_limitations_node",    
     "writer_tables_node",
     "writer_references_node",
     "writer_assembler_node",

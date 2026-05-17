@@ -78,8 +78,10 @@ GAPFINDER_PROMPT: str = _read_text("gapfinder_prompt.md")
 # del writer; los otros 3 nodos son Python puro). Reemplaza al WRITER_PROMPT
 # monolítico, que queda DEPRECATED y NO se carga: la lógica de tablas y
 # references list ahora vive en Python (writer_tables_node, writer_references_node).
-WRITER_SYNTHESIS_PROMPT: str = _read_text("writer_synthesis_prompt.md")
-WRITER_APA7_RULES:       str = _read_text("writer_apa7_rules.md")
+WRITER_SYNTHESIS_PROMPT:   str = _read_text("writer_synthesis_prompt.md")
+WRITER_DISCUSSION_PROMPT:  str = _read_text("writer_discussion_prompt.md")
+WRITER_LIMITATIONS_PROMPT: str = _read_text("writer_limitations_prompt.md")
+WRITER_APA7_RULES:         str = _read_text("writer_apa7_rules.md")
 
 # Agentes Cochrane (solo se cargan; los nodos del grafo deciden si correr)
 ROB_ASSESSOR_PROMPT:   str = _read_text("rob_assessor_prompt.md")
@@ -101,6 +103,8 @@ __all__ = [
     "ANALYST_PROMPT_32B",
     "GAPFINDER_PROMPT",
     "WRITER_SYNTHESIS_PROMPT",
+    "WRITER_DISCUSSION_PROMPT",    
+    "WRITER_LIMITATIONS_PROMPT",   
     "WRITER_APA7_RULES",
     "ROB_ASSESSOR_PROMPT",
     "GRADE_PROFILER_PROMPT",
