@@ -1105,15 +1105,17 @@ li { margin: 4px 0; }
 table {
     border-collapse: collapse;
     width: 100%;
-    margin: 20px 0 30px 0;
-    font-size: 10.5pt;
+    margin: 16px 0 24px 0;
+    font-size: 8.5pt; /* Reducido de 9.5pt para optimizar espacio y evitar desbordes */
 }
 th, td {
     border-bottom: 1px solid #e2e8f0;
-    padding: 10px 12px;
+    padding: 6px 8px;
     text-align: left;
     vertical-align: top;
-    line-height: 1.4;
+    line-height: 1.3;
+    word-break: break-word;     /* Fuerza el salto de línea en citas o textos largos */
+    overflow-wrap: break-word;  /* Garantiza que el texto nunca empuje la celda fuera del margen */
 }
 th {
     background-color: #f4f6f8;
@@ -1123,7 +1125,6 @@ th {
     font-family: 'DejaVu Sans', sans-serif;
 }
 tr { page-break-inside: avoid; }
-/* Filas alternas para mejor lectura de los clusters */
 tr:nth-child(even) { background-color: #f8fafc; }
 
 /* REFERENCIAS: APA 7 Sangría Francesa (Hanging Indent) */

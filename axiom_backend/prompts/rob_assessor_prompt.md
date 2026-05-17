@@ -54,7 +54,10 @@ You MUST emit your response in EXACTLY this structure.
 - You MUST close the `<think>` block with `</think>` before emitting the JSON.
 - The JSON must be wrapped in `<json>...</json>` tags. No markdown outside these tags.
 - Rationales MUST cite specifics from the input. Vague rationales like "methodology was unclear" without evidence are unacceptable.
+- You MUST NEVER use 'n/a' for Domain 2, Domain 3, Domain 4, Domain 5, or the Overall Judgment. 'n/a' is ONLY allowed for Domain 1.
 - If the input lacks information to judge a domain, use `judgment` = "some" with `rationale` = "Insufficient information in methodology section to assess <specific aspect>." Do NOT default to "low" when in doubt.
 - NEVER invent details not present in the input. If the study sample size is not reported, do NOT make one up.
+- You MUST explicitly write the rationale field for EVERY domain. Do not skip it.
 - The `overall` rationale MUST reference at least 2 specific domain judgments by name.
 - The `overall` judgment MUST be mathematically consistent: you cannot have overall="low" while any domain (other than D1 = "n/a") is "high" or "some".
+- COCHRANE LOGIC RULE: If ANY single domain is rated as 'some' or 'high', your overall judgment CANNOT be 'low'.
