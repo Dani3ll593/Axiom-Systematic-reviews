@@ -318,8 +318,8 @@ async def _screen_one(
                         max_retries=3,
                         presence_penalty=0.0,
                         frequency_penalty=0.0,
-                        temperature=0.3,
-                        max_tokens=1024,
+                        temperature=0.1,
+                        max_tokens=2048,
                     ),
                     timeout=LLM_TIMEOUT_S,
                 )

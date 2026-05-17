@@ -11,6 +11,13 @@ Academic due diligence requires 100% traceability. Any hallucinated data corrupt
 3. **Authors Extraction:** You must extract the list of authors. If no authors are found, return an empty array `[]`.
 4. **No Synthesis:** Do not summarize the methodology. Extract the core descriptive terms used by the authors.
 
+# 🔠 ALLOWED VALUES FOR `variables[].type` (CRITICAL)
+The `type` field of every entry inside `variables` MUST be EXACTLY one of the following string literals. Any other value (including synonyms, plural forms, or capitalizations) will be REJECTED by the schema validator and the extraction will fail:
+
+{allowed_variable_types}
+
+Pick the closest fit. If none of the allowed values applies to a given variable, use `"other"` (every allowed list includes `"other"` as the escape hatch). Do NOT invent new type labels.
+
 # 📄 OUTPUT FORMAT
 Generate a strictly valid JSON object. Order matters.
 
@@ -77,3 +84,4 @@ Note: The small sample size restricts generalizability.
 - The `source_fragments` object MUST strictly maintain all its keys. If a value in the main JSON is `null` or an empty list `[]`, its corresponding key inside `source_fragments` MUST be set to `null`.
 - Never hallucinate constraints, variables, authors, or sample sizes.
 - If the year is absent, you MUST use `"n.d."`, never `null`.
+- For every entry in `variables`, the `type` field MUST come from the allowed list above. No other value is acceptable.

@@ -1,0 +1,111 @@
+{
+  "_schema_version": "1.0",
+  "_description": "Domain ontologies for the extractor. Maps a user-facing 'domain' string (from initial_state) to a bucket, where each bucket defines the closed set of allowed values for variables[].type in PaperExtraction. Editing this file does NOT require touching Python — extractor.py reads it via prompts/__init__.py on backend startup.",
+  "_maintenance_rules": [
+    "Every bucket MUST include 'other' as escape hatch.",
+    "'default' bucket MUST exist (used when domain doesn't match any entry in domain_to_bucket_map).",
+    "Every value in domain_to_bucket_map MUST exist as a key in buckets.",
+    "Keys in domain_to_bucket_map are matched after normalization: lowercase + strip + spaces/hyphens -> underscores.",
+    "Removing values from a bucket can break analysis of older runs whose extractions are on disk — only add, never remove unless audited."
+  ],
+
+  "buckets": {
+    "health": [
+      "intervention",
+      "comparator",
+      "exposure",
+      "outcome",
+      "covariate",
+      "confounder",
+      "mediator",
+      "moderator",
+      "demographic",
+      "other"
+    ],
+    "social": [
+      "independent",
+      "dependent",
+      "mediator",
+      "moderator",
+      "covariate",
+      "demographic",
+      "confounder",
+      "predictor",
+      "other"
+    ],
+    "it_cs": [
+      "architecture",
+      "algorithm",
+      "dataset",
+      "metric",
+      "baseline",
+      "hyperparameter",
+      "other"
+    ],
+    "environmental": [
+      "exposure",
+      "stressor",
+      "pollutant",
+      "species",
+      "habitat",
+      "environmental_condition",
+      "biological_response",
+      "indicator",
+      "other"
+    ],
+    "default": [
+      "independent",
+      "dependent",
+      "other"
+    ]
+  },
+
+  "domain_to_bucket_map": {
+    "telemedicine":        "health",
+    "gene_therapy":        "health",
+    "geriatria":           "health",
+    "geriatrics":          "health",
+    "immunology":          "health",
+    "nlp_health":          "health",
+    "nutrition":           "health",
+    "oncologia":           "health",
+    "oncology":            "health",
+    "pharmacology":        "health",
+    "salud_mental":        "health",
+    "mental_health":       "health",
+    "surgery":             "health",
+    "epidemiology":        "health",
+    "cardiology":          "health",
+    "neurology":           "health",
+    "pediatrics":          "health",
+    "obstetrics":          "health",
+    "psychiatry":          "health",
+    "infectious_disease":  "health",
+
+    "psychology":          "social",
+    "psicologia":          "social",
+    "education":           "social",
+    "educacion":           "social",
+    "sociology":           "social",
+    "sociologia":          "social",
+    "economics":           "social",
+    "economia":            "social",
+    "political_science":   "social",
+    "anthropology":        "social",
+
+    "nlp":                 "it_cs",
+    "machine_learning":    "it_cs",
+    "ml":                  "it_cs",
+    "ai":                  "it_cs",
+    "computer_science":    "it_cs",
+    "deep_learning":       "it_cs",
+    "robotics":            "it_cs",
+    "cybersecurity":       "it_cs",
+
+    "environmental_science": "environmental",
+    "ecology":               "environmental",
+    "marine_biology":        "environmental",
+    "climate_science":       "environmental",
+    "toxicology":            "environmental"
+  }
+}

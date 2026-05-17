@@ -14,15 +14,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from functools import lru_cache
 from typing import Literal, Optional
 
 import httpx
 import instructor
 from openai import AsyncOpenAI
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, ValidationError, create_model, field_validator
 
 from axiom_backend.config import settings
-from axiom_backend.prompts import EXTRACTION_PROMPT
+from axiom_backend.prompts import EXTRACTION_PROMPT, DOMAIN_ONTOLOGIES
 from axiom_backend.state import AxiomState
 from axiom_backend.tools.pdf_parser import parse_pdf
 from axiom_backend.tools.llm_router import LLM_FEATHERLESS, featherless_credit, COST_7B
@@ -37,6 +38,34 @@ MAX_INPUT_CHARS = 65000  # Truncation limit to prevent 7B context overflow
 # PDF fetch tunables — separados del LLM para no acoplar concurrencias
 PDF_DOWNLOAD_CONCURRENCY = 8
 PDF_DOWNLOAD_TIMEOUT_S = 30.0
+
+# ============================================================================
+# Resolución de bucket de dominio
+# ============================================================================
+# Las ontologías y el mapeo viven en `prompts/domain_ontologies.json`,
+# cargado y validado por `prompts/__init__.py` al import. Acá solo lo
+# consumimos. Para agregar/editar dominios o buckets: editar el JSON,
+# reiniciar el backend. Cero cambios en este archivo.
+
+def _normalize_domain(domain: str | None) -> str:
+    """lowercase + strip + espacios/guiones → underscore. Estable como key del map."""
+    return (domain or "").lower().strip().replace(" ", "_").replace("-", "_")
+
+
+def _domain_to_bucket(domain: str | None) -> str:
+    """Mapea domain → bucket. Devuelve 'default' si no matchea ninguno."""
+    domain_map = DOMAIN_ONTOLOGIES["domain_to_bucket_map"]
+    return domain_map.get(_normalize_domain(domain), "default")
+
+
+def _allowed_types_for_bucket(bucket: str) -> tuple[str, ...]:
+    """Devuelve la tupla de Literals válidos para el bucket.
+
+    Si el bucket no existe (no debería pasar tras la validación de
+    _validate_domain_ontologies, pero defensa-en-profundidad), cae a 'default'.
+    """
+    buckets = DOMAIN_ONTOLOGIES["buckets"]
+    return tuple(buckets.get(bucket, buckets["default"]))
 
 # --- Schema Definitions ---
 class VariableItem(BaseModel):
@@ -94,6 +123,53 @@ class PaperExtraction(BaseModel):
         if isinstance(v, str) and v.isdigit():
             return int(v)  # normalizar a int siempre que sea posible
         return v
+
+# ============================================================================
+# Factory de schemas Pydantic dinámicos por bucket
+# ============================================================================
+
+@lru_cache(maxsize=8)
+def _build_extraction_schema(bucket: str) -> type[BaseModel]:
+    """Construye PaperExtraction con el Literal apropiado para el bucket.
+
+    Cacheado por bucket: el mismo schema se reutiliza entre papers del mismo
+    run y entre runs del mismo bucket. maxsize=8 alcanza incluso si el JSON
+    crece a 6-7 buckets.
+
+    Estrategia:
+      1. Crear DynamicVariableItem con Literal[tipos_del_bucket].
+      2. Crear PaperExtraction_<bucket> heredando de PaperExtraction (base
+         estática que conserva source_fragments, year validator, etc.) con
+         SOLO override del campo `variables`.
+    """
+    variable_types = _allowed_types_for_bucket(bucket)
+
+    # Literal[tuple(a,b,c)] es equivalente a Literal[a,b,c] en Python 3.10+.
+    DynamicVariableItem = create_model(
+        f"VariableItem_{bucket}",
+        name=(str, ...),
+        type=(Literal[tuple(variable_types)], ...),  # type: ignore[valid-type]
+        measurement=(Optional[str], None),
+    )
+
+    DynamicPaperExtraction = create_model(
+        f"PaperExtraction_{bucket}",
+        __base__=PaperExtraction,
+        variables=(Optional[list[DynamicVariableItem]], []),
+    )
+
+    return DynamicPaperExtraction
+
+
+def _render_extraction_prompt(bucket: str) -> str:
+    """Renderiza EXTRACTION_PROMPT sustituyendo {allowed_variable_types}
+    por la lista del bucket. Usamos .replace() porque el prompt tiene
+    muchas `{}` literales en el ejemplo JSON.
+    """
+    types = _allowed_types_for_bucket(bucket)
+    types_block = "\n".join(f'  - `"{t}"`' for t in types)
+    return EXTRACTION_PROMPT.replace("{allowed_variable_types}", types_block)
+
 
 # --- LLM Client Setup ---
 _clients: dict = {}
@@ -168,25 +244,27 @@ async def _extract_one(
     paper: dict,
     model: str,
     base_url: str,
-) -> PaperExtraction | None:
-    """Ejecuta la extracción sobre un único paper con reintentos."""
+    response_model: type[BaseModel],
+    system_prompt: str,
+) -> Optional[BaseModel]:
+    """Extrae un paper con un schema Pydantic y un prompt ya renderizados.
+
+    Tras el refactor a esquemas dinámicos, `response_model` y `system_prompt`
+    vienen de `run_extractor` (que los calcula una sola vez por run usando
+    el `domain` del state). Esta función no tiene awareness del bucket.
+    """
     client = _get_client(base_url)
-    
     raw_text = paper.get("full_text") or paper.get("abstract") or ""
     text_to_process = raw_text[:MAX_INPUT_CHARS]
 
     try:
-        # Semáforo credit-based de Featherless: el extractor usa Qwen-7B
-        # (cost=1). El cap global de 4 units es compartido con todos los
-        # agentes; este lock previene 429s cuando otros agentes (analyst,
-        # rob_assessor) corren concurrentemente.
         async with featherless_credit(cost=COST_7B):
             extraction = await asyncio.wait_for(
                 client.chat.completions.create(
                     model=model,
-                    response_model=PaperExtraction,
+                    response_model=response_model,
                     messages=[
-                        {"role": "system", "content": EXTRACTION_PROMPT},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user",   "content": f"Paper text:\n{text_to_process}"},
                     ],
                     max_retries=3,
@@ -197,11 +275,6 @@ async def _extract_one(
                 timeout=LLM_TIMEOUT_S,
             )
 
-        # Enrichment con metadata del paper original. Antes este bloque estaba
-        # DESPUÉS del `return` dentro del `async with`, así que nunca se
-        # ejecutaba (código muerto). Resultado: cuando el LLM no extraía
-        # title/authors/doi/year (común cuando solo ve el abstract), esos
-        # campos quedaban None/"n.d." en vez de tomarse del paper original.
         if extraction:
             extraction.title = extraction.title or paper.get("title")
             extraction.authors = extraction.authors or paper.get("authors", [])
@@ -237,20 +310,27 @@ async def _extract_one(
 async def run_extractor(state: AxiomState) -> dict:
     """Nodo del grafo. Extrae datos y devuelve deltas para los reducers."""
     papers = state.get("screened_papers", [])
-    
+
     if not papers:
         logger.warning("extractor: screened_papers vacío", extra={"node": "extractor"})
         return {}
 
-    # Enriquecer con full_text vía pdf_parser donde haya pdf_url disponible.
-    # Los papers sin pdf_url o cuyo PDF no parsee bien caen al abstract (comportamiento previo).
+    # ── Decisión de schema/prompt UNA vez por run ──
+    domain = state.get("domain", "")
+    bucket = _domain_to_bucket(domain)
+    response_model = _build_extraction_schema(bucket)
+    system_prompt = _render_extraction_prompt(bucket)
+    logger.info(
+        "extractor: domain=%r → bucket=%r (variable types: %s)",
+        domain, bucket, ", ".join(_allowed_types_for_bucket(bucket)),
+    )
+
     papers = await _enrich_with_pdf_text(papers)
 
     sem = asyncio.Semaphore(MAX_CONCURRENT)
     valid_papers = []
     errors_delta: list[dict] = []
 
-    # Short-circuit empty text before hitting the LLM API
     for p in papers:
         pid = p.get("paper_id")
         text = p.get("full_text") or p.get("abstract") or ""
@@ -258,7 +338,7 @@ async def run_extractor(state: AxiomState) -> dict:
             errors_delta.append({
                 "node": "extractor",
                 "paper_id": pid,
-                "error": "empty_paper_text"
+                "error": "empty_paper_text",
             })
         else:
             valid_papers.append(p)
@@ -266,9 +346,11 @@ async def run_extractor(state: AxiomState) -> dict:
     async def _gated(p: dict):
         async with sem:
             return await _extract_one(
-                paper=p, 
-                model=settings.model_7b_name, 
-                base_url="FEATHERLESS_7B"
+                paper=p,
+                model=settings.model_7b_name,
+                base_url="FEATHERLESS_7B",
+                response_model=response_model,
+                system_prompt=system_prompt,
             )
 
     results = await asyncio.gather(
@@ -277,10 +359,8 @@ async def run_extractor(state: AxiomState) -> dict:
     )
 
     extractions_delta: list[dict] = []
-
     for paper, result in zip(valid_papers, results):
         pid = paper.get("paper_id")
-
         if isinstance(result, Exception):
             errors_delta.append({
                 "node": "extractor",
@@ -288,7 +368,6 @@ async def run_extractor(state: AxiomState) -> dict:
                 "error": f"{type(result).__name__}: {result}",
             })
             continue
-
         if result is None:
             errors_delta.append({
                 "node": "extractor",
@@ -296,13 +375,11 @@ async def run_extractor(state: AxiomState) -> dict:
                 "error": "extraction_failed_or_timed_out",
             })
             continue
-
         extraction_dict = result.model_dump()
         if not extraction_dict.get("paper_id"):
             extraction_dict["paper_id"] = pid
-            
         extractions_delta.append(extraction_dict)
-    
+
     return {
         "extractions": extractions_delta,
         "errors": errors_delta,

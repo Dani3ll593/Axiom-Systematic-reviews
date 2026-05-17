@@ -65,6 +65,46 @@ SCREENER_FEWSHOT_32B: str = _read_text("screener_fewshot_32b.md")
 # the source of truth is the Pydantic class in src/agents/extractor.py).
 EXTRACTION_PROMPT: str  = _read_text("extraction_prompt.md")
 EXTRACTOR_SCHEMA:  dict = _read_json("extractor_schema.json")
+DOMAIN_ONTOLOGIES:   dict = _read_json("domain_ontologies.json")
+
+def _validate_domain_ontologies(data: dict) -> None:
+    """Sanity check al cargar domain_ontologies.json. Fail-loud al import-time
+    en vez de descubrir el problema cuando un run cae al schema 'default'
+    silenciosamente.
+
+    Reglas:
+      - 'buckets' y 'domain_to_bucket_map' existen.
+      - 'default' está en buckets.
+      - Todo bucket incluye 'other' como escape hatch.
+      - Todo valor en domain_to_bucket_map apunta a un bucket que existe.
+    """
+    if "buckets" not in data or "domain_to_bucket_map" not in data:
+        raise ValueError(
+            "domain_ontologies.json: missing top-level keys 'buckets' or 'domain_to_bucket_map'."
+        )
+    buckets = data["buckets"]
+    domain_map = data["domain_to_bucket_map"]
+
+    if "default" not in buckets:
+        raise ValueError("domain_ontologies.json: 'default' bucket is required.")
+
+    for name, types in buckets.items():
+        if not isinstance(types, list) or not types:
+            raise ValueError(f"domain_ontologies.json: bucket {name!r} must be a non-empty list.")
+        if "other" not in types:
+            raise ValueError(
+                f"domain_ontologies.json: bucket {name!r} must include 'other' as escape hatch."
+            )
+
+    unknown_targets = {b for b in domain_map.values() if b not in buckets}
+    if unknown_targets:
+        raise ValueError(
+            f"domain_ontologies.json: domain_to_bucket_map points to undefined buckets: "
+            f"{sorted(unknown_targets)}"
+        )
+
+
+_validate_domain_ontologies(DOMAIN_ONTOLOGIES)
 
 # Agentes 4a / 4b — Analysts (dual)
 ANALYST_PROMPT_7B:  str = _read_text("analyst_prompt_v3.md")
@@ -99,6 +139,7 @@ __all__ = [
     "SCREENER_FEWSHOT_32B",
     "EXTRACTION_PROMPT",
     "EXTRACTOR_SCHEMA",
+    "DOMAIN_ONTOLOGIES",
     "ANALYST_PROMPT_7B",
     "ANALYST_PROMPT_32B",
     "GAPFINDER_PROMPT",

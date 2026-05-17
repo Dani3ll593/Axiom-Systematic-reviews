@@ -690,13 +690,21 @@ def _build_apa7_full_entry(paper: dict) -> str:
 
     parts = [f"{authors} ({year}). {title}."]
     if journal:
-        parts.append(f"*{journal}*.")
+        j_str = f"<i>{journal}</i>"
+        if volume:
+            j_str += f", <i>{volume}</i>"
+        if issue:
+            j_str += f"({issue})"
+        if pages:
+            j_str += f", {pages}"
+        parts.append(j_str + ".")
+        
     if doi:
-        # Normalizar a https://doi.org/... si vino en otro formato
         if doi.startswith("http"):
             parts.append(doi)
         else:
             parts.append(f"https://doi.org/{doi.lstrip('/')}")
+            
     return " ".join(parts)
 
 
@@ -947,27 +955,13 @@ async def writer_references_node(state: AxiomState) -> dict:
     def _numbered_section(title: str, papers: list[dict]) -> str:
         if not papers:
             return f"## {title}\n\n{L['empty_section']}\n"
-        # Cada entry prefijada con `N. ` para numeración con reinicio por sección.
-        entries = "\n\n".join(
-            f"{i}.  {_build_apa7_full_entry(p)}"
-            for i, p in enumerate(papers, start=1)
+        
+        # Envolvemos cada entrada en un div en lugar de usar enumeración Markdown
+        entries = "\n".join(
+            f'<div class="reference-item">{_build_apa7_full_entry(p)}</div>'
+            for p in papers
         )
-        return f'## {title}\n\n<div class="references">\n\n{entries}\n\n</div>\n'
-
-    included_title   = L["included_title"].format(n=len(included))
-    restricted_title = L["restricted_title"].format(n=len(restricted))
-
-    refs_md = (
-        _numbered_section(included_title, included)
-        + "\n"
-        + _numbered_section(restricted_title, restricted)
-    )
-
-    logger.info(
-        "writer_references: %d incluidas, %d restringidas | lang=%s",
-        len(included), len(restricted), _detect_language(question),
-    )
-    return {"writer_references_md": refs_md}
+        return f'## {title}\n\n<div class="references">\n{entries}\n</div>\n'
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -986,8 +980,6 @@ async def writer_references_node(state: AxiomState) -> dict:
 # "Discussion". Si el corte no es identificable, fallback: tablas van al final
 # antes de references.
 # ────────────────────────────────────────────────────────────────────────────
-
-# REEMPLAZA TODO writer_assembler_node POR:
 
 async def writer_assembler_node(state: AxiomState) -> dict:
     """Concatena los 5 markdown intermedios en orden y produce 1 PDF unificado.
@@ -1100,55 +1092,55 @@ async def writer_assembler_node(state: AxiomState) -> dict:
 # quedan en el archivo por si algún consumidor histórico los importa, pero
 # el assembler usa solo este.
 _CSS_UNIFIED = _CSS_BASE + """
-/* Tipografía académica: serif para body, sans-serif para títulos */
+/* Tipografía académica */
 body { font-family: 'DejaVu Serif', 'Times New Roman', 'Times', serif; }
 h1, h2, h3 { font-family: 'DejaVu Sans', 'Helvetica Neue', 'Arial', sans-serif; }
 
-/* Prosa: párrafos justificados, sin sangría (estilo manuscript moderno) */
+/* Prosa académica */
 p { margin: 8px 0; text-align: justify; }
-
-/* Listas */
 ul, ol { margin: 8px 0 8px 22px; }
 li { margin: 4px 0; }
 
-/* Tablas: estilo académico con borders limpios y headers destacados */
+/* TABLAS: Estilo académico profesional */
 table {
     border-collapse: collapse;
     width: 100%;
-    margin: 14px 0;
-    font-size: 9.5pt;
-    page-break-inside: auto;
+    margin: 20px 0 30px 0;
+    font-size: 10.5pt;
 }
 th, td {
-    border: 1px solid #cbd5e0;
-    padding: 6px 9px;
+    border-bottom: 1px solid #e2e8f0;
+    padding: 10px 12px;
     text-align: left;
     vertical-align: top;
+    line-height: 1.4;
 }
 th {
-    background: #f1f5f9;
-    font-weight: 600;
-    color: #1E3A8A;
+    background-color: #f4f6f8;
+    font-weight: bold;
+    color: #1a202c;
+    border-bottom: 2px solid #cbd5e1;
     font-family: 'DejaVu Sans', sans-serif;
 }
 tr { page-break-inside: avoid; }
+/* Filas alternas para mejor lectura de los clusters */
+tr:nth-child(even) { background-color: #f8fafc; }
 
-/* Referencias: hanging indent estricto APA 7 */
-.references p {
-    text-indent: -1.27cm;
-    padding-left: 1.27cm;
-    margin-bottom: 8px;
-    text-align: left;
+/* REFERENCIAS: APA 7 Sangría Francesa (Hanging Indent) */
+.references {
+    margin-top: 15px;
+}
+.reference-item {
+    text-indent: -1.27cm; /* Tira la primera línea hacia la izquierda */
+    padding-left: 1.27cm; /* Empuja todo el bloque hacia la derecha */
+    margin-bottom: 16px;  /* Espacio real entre referencias */
+    text-align: justify;
+    line-height: 1.5;
+    font-size: 10.5pt;
 }
 
-/* Separadores entre secciones grandes (de los --- en el markdown) */
-hr {
-    border: none;
-    border-top: 1px solid #cbd5e0;
-    margin: 24px 0;
-}
-
-/* Énfasis (DOIs, journals italicizados) */
-em { font-style: italic; }
+/* Separadores y énfasis */
+hr { border: none; border-top: 1px solid #cbd5e0; margin: 24px 0; }
+em, i { font-style: italic; }
 strong { font-weight: 600; color: #1E3A8A; }
 """
