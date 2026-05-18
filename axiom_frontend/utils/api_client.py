@@ -119,7 +119,6 @@ def stream_pipeline_events(run_id: str) -> Iterator[dict[str, Any]]:
                     try:
                         yield json.loads(raw)
                     except json.JSONDecodeError:
-                        # Backend sent a malformed event — surface as error
                         yield {
                             "type": "log",
                             "level": "error",
@@ -127,7 +126,6 @@ def stream_pipeline_events(run_id: str) -> Iterator[dict[str, Any]]:
                         }
                 continue
             if line.startswith(":"):
-                # SSE comment / keepalive — ignore
                 continue
             if line.startswith("data:"):
                 data_buf.append(line[5:].lstrip())
@@ -147,6 +145,46 @@ def fetch_final_state(run_id: str) -> dict[str, Any]:
     return resp.json()
 
 
+# ─── Cancellation ───────────────────────────────────────────────────
+
+class CancelFailed(RuntimeError):
+    """Raised when the backend refuses or fails to cancel a run."""
+
+
+def cancel_pipeline(run_id: str) -> dict[str, Any]:
+    """POST /pipeline/{run_id}/cancel — requests cooperative cancellation.
+
+    Returns the backend response dict (typically `{status: "cancelling"}`).
+    The actual cancellation is asynchronous: the currently running node
+    finishes its in-flight LLM call, then the graph stops. The frontend
+    should keep listening on the SSE stream and wait for a `cancelled`
+    event before clearing UI state.
+
+    Raises:
+        CancelFailed — if the backend returns a non-2xx response.
+    """
+    url = f"{_backend_url()}/pipeline/{run_id}/cancel"
+    headers = {k: v for k, v in _auth_headers().items() if k != "Accept"}
+    try:
+        resp = httpx.post(
+            url, headers=headers,
+            timeout=httpx.Timeout(DEFAULT_CONNECT_TIMEOUT, read=15.0),
+        )
+    except httpx.HTTPError as e:
+        raise CancelFailed(f"Network error: {e}") from e
+
+    if resp.status_code in (200, 202):
+        try:
+            return resp.json()
+        except Exception:
+            return {"status": "cancelling"}
+    if resp.status_code == 404:
+        raise CancelFailed("Run not found")
+    if resp.status_code == 409:
+        raise CancelFailed("Run already finished")
+    raise CancelFailed(f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+
 # ─── PDF download ───────────────────────────────────────────────────
 
 class PdfNotReady(RuntimeError):
@@ -160,7 +198,6 @@ class PdfNotAvailable(RuntimeError):
 def fetch_report_pdf(run_id: str) -> bytes:
     """GET /pipeline/{run_id}/report.pdf — returns the PDF bytes.
 
-    Per BRIEF_BACKEND_PDF_ADDENDUM:
       • 200 → bytes (Content-Type: application/pdf)
       • 202 → run still in progress     → raises PdfNotReady
       • 404 → PDF not available / missing → raises PdfNotAvailable
@@ -176,13 +213,14 @@ def fetch_report_pdf(run_id: str) -> bytes:
     resp.raise_for_status()
     return resp.content
 
+
 def fetch_apa7_pdf(run_id: str) -> bytes:
-    """GET /pipeline/{run_id}/apa7.pdf — returns the PDF bytes.
-    Mirrors fetch_report_pdf; only the endpoint and error string differ.
-      • 200 → bytes (Content-Type: application/pdf)
-      • 202 → run still in progress     → raises PdfNotReady
-      • 404 → PDF not available / missing → raises PdfNotAvailable
-      • any other non-2xx → propagates httpx.HTTPStatusError
+    """DEPRECATED — the writer was refactored to produce a single unified PDF
+    (executive_report_pdf_path). The APA 7 PDF endpoint still exists on the
+    backend for backwards compatibility but always returns 404 now because
+    `apa7_pdf_path` is None after a successful run. Kept here so external
+    callers that still reference it import cleanly; new code should call
+    fetch_report_pdf() instead.
     """
     url = f"{_backend_url()}/pipeline/{run_id}/apa7.pdf"
     headers = {k: v for k, v in _auth_headers().items() if k != "Accept"}

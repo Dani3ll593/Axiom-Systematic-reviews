@@ -1,7 +1,7 @@
 """
 ui/screen_config.py
 ───────────────────
-Screen 01 — Research question + (optional) PICOS criteria.
+Screen 01 — Research question + (optional) PICOS criteria + Cochrane toggle.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def render_screen_config() -> None:
 
     st.markdown('<div class="axiom-card">', unsafe_allow_html=True)
 
-    # Research question
+    # ─── Section 01 — Research question ─────────────────────────────
     st.markdown(
         f'<div class="axiom-section-label">'
         f'<span class="axiom-section-num">01</span>'
@@ -50,21 +50,21 @@ def render_screen_config() -> None:
     word_count = len(query.split()) if query.strip() else 0
     st.caption(f"`{t('config.word_count', n=word_count, max=200)}`")
 
-    # Advanced PICOS
+    # ─── Section 02 — Advanced PICOS ────────────────────────────────
     with st.expander(t("config.section.criteria"), expanded=False):
         col_p, col_i = st.columns(2)
         with col_p:
             st.markdown(f"**{t('config.label.population')}**")
             population = st.text_input(
                 "P", label_visibility="collapsed",
-                placeholder="ej. estudiantes de posgrado, LATAM",
+                placeholder=t("config.placeholder.p"),
                 key="picos_p",
             )
         with col_i:
             st.markdown(f"**{t('config.label.intervention')}**")
             intervention = st.text_input(
                 "I", label_visibility="collapsed",
-                placeholder="ej. mindfulness-based interventions",
+                placeholder=t("config.placeholder.i"),
                 key="picos_i",
             )
 
@@ -73,14 +73,14 @@ def render_screen_config() -> None:
             st.markdown(f"**{t('config.label.comparison')}**")
             comparator = st.text_input(
                 "C", label_visibility="collapsed",
-                placeholder="ej. lista de espera / placebo activo",
+                placeholder=t("config.placeholder.c"),
                 key="picos_c",
             )
         with col_o:
             st.markdown(f"**{t('config.label.outcomes')}**")
             outcomes = st.text_input(
                 "O", label_visibility="collapsed",
-                placeholder="ej. burnout, agotamiento emocional",
+                placeholder=t("config.placeholder.o"),
                 key="picos_o",
             )
 
@@ -90,24 +90,45 @@ def render_screen_config() -> None:
 
         with col_studies:
             st.markdown(f"**{t('config.label.study_design')}**")
-            study_rct  = st.checkbox("RCT — Randomized Controlled Trials", value=True)
-            study_obs  = st.checkbox("Observacional (cohorte, caso-control)", value=True)
-            study_rev  = st.checkbox("Revisión sistemática / meta-análisis", value=False)
-            study_qual = st.checkbox("Cualitativo (etnográfico, grounded theory)", value=False)
+            study_rct  = st.checkbox(t("config.study.rct"),  value=True,  key="study_rct")
+            study_obs  = st.checkbox(t("config.study.obs"),  value=True,  key="study_obs")
+            study_rev  = st.checkbox(t("config.study.rev"),  value=False, key="study_rev")
+            study_qual = st.checkbox(t("config.study.qual"), value=False, key="study_qual")
 
         with col_filters:
             st.markdown(f"**{t('config.label.year_range')}**")
             yr1, yr2 = st.columns(2)
-            year_from = yr1.number_input(t("config.label.year_from"), min_value=1990, max_value=2026, value=2018, key="yr_from")
-            year_to   = yr2.number_input(t("config.label.year_to"), min_value=1990, max_value=2026, value=2025, key="yr_to")
+            year_from = yr1.number_input(
+                t("config.label.year_from"),
+                min_value=1990, max_value=2026, value=2018, key="yr_from",
+            )
+            year_to = yr2.number_input(
+                t("config.label.year_to"),
+                min_value=1990, max_value=2026, value=2025, key="yr_to",
+            )
 
             st.markdown(f"**{t('config.label.languages')}**")
             lc1, lc2, lc3 = st.columns(3)
-            lang_en = lc1.checkbox("English",   value=True)
-            lang_es = lc2.checkbox("Español",   value=True)
-            lang_pt = lc3.checkbox("Português", value=True)
+            lang_en = lc1.checkbox(t("config.lang.english"),    value=True, key="lang_en")
+            lang_es = lc2.checkbox(t("config.lang.spanish"),    value=True, key="lang_es")
+            lang_pt = lc3.checkbox(t("config.lang.portuguese"), value=True, key="lang_pt")
 
-    # Sources
+    # ─── Section 03 — Methodology (Cochrane toggle) ─────────────────
+    st.markdown(
+        f'<div class="axiom-section-label" style="margin-top:20px;">'
+        f'<span class="axiom-section-num">02</span>'
+        f'<span class="axiom-section-title">{t("config.section.methodology")}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    cochrane_mode = st.checkbox(
+        t("config.label.cochrane"),
+        value=False,
+        key="cochrane_mode",
+        help=t("config.help.cochrane"),
+    )
+
+    # Sources strip
     st.markdown(
         f'<div style="margin-top:12px; font-family:Space Mono,monospace; '
         f'font-size:11px; color:var(--text-muted);">{t("config.sources_strip")}</div>',
@@ -116,6 +137,7 @@ def render_screen_config() -> None:
 
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # ─── CTA ────────────────────────────────────────────────────────
     if st.button(t("config.cta.start"), use_container_width=True, type="primary"):
         ok, err_key, ctx = validate_research_query(query)
         if not ok:
@@ -144,13 +166,9 @@ def render_screen_config() -> None:
         if lang_es: languages.append("Spanish")
         if lang_pt: languages.append("Portuguese")
 
-        # Los inputs P/I/C/O son text_inputs simples; permitimos al usuario
-        # separar múltiples items con coma o punto y coma. Si en el futuro
-        # se cambian por chips reales, esta función pasa a ser identity.
         def _split_csv(s: str) -> list[str]:
             return [x.strip() for x in (s or "").replace(";", ",").split(",") if x.strip()]
 
-        # form: shape que map_form_to_initial_state consume directamente.
         form = {
             "question": query,
             "population_include":   _split_csv(population),
@@ -161,11 +179,9 @@ def render_screen_config() -> None:
             "year_min": int(year_from),
             "year_max": int(year_to),
             "languages": languages,
+            "cochrane_mode": bool(cochrane_mode),
         }
 
-        # st.session_state.config conserva el dict del form (útil para
-        # screen_progress que muestra "CONSULTA: <query>" en el header).
-        # state_payload es lo que se manda al backend.
         st.session_state.config        = form
         st.session_state.state_payload = map_form_to_initial_state(form)
         st.session_state.screen        = "progress"

@@ -43,7 +43,6 @@ EXCLUSION_REASONS_FIXED_LIST = [
     "duplicate", "unavailable_full_text",
 ]
 
-# Defaults para los 4 escenarios sin form lleno
 DEFAULT_YEAR_MIN = 2020
 DEFAULT_YEAR_MAX = 2025
 DEFAULT_LANGUAGES = ["English", "Spanish"]
@@ -55,7 +54,7 @@ DEFAULT_STUDY_DESIGN_INCLUDE = [
 DEFAULT_STUDY_DESIGN_EXCLUDE = ["case report", "editorial"]
 DEFAULT_PUBLICATION_STATUS_ACCEPTED = ["published"]
 
-FRONTEND_VERSION = "1.1"
+FRONTEND_VERSION = "1.2"  # bumped for cochrane_mode
 
 
 # ============================================================================
@@ -84,17 +83,16 @@ class FormData(TypedDict, total=False):
     publication_status_accepted: list[str]
     publication_status_rejected: list[str]
 
+    # Cochrane toggle — when True the backend graph runs rob_assessor and
+    # grade_profiler in addition to the standard PRISMA pipeline.
+    cochrane_mode: bool
+
 
 # ============================================================================
 # Helpers — list cleaning
 # ============================================================================
 def _clean_list(items: Any) -> list[str]:
-    """Strip whitespace and trailing punctuation, drop empties, dedupe.
-
-    Tolerant input: accepts None, lists, tuples, sets, even single strings.
-    Trailing periods/semicolons/commas are stripped because regex-extracted
-    items often end at a sentence boundary.
-    """
+    """Strip whitespace and trailing punctuation, drop empties, dedupe."""
     if items is None:
         return []
     if isinstance(items, str):
@@ -105,7 +103,6 @@ def _clean_list(items: Any) -> list[str]:
     out: list[str] = []
     for item in items:
         s = (str(item) if item is not None else "").strip()
-        # Strip trailing sentence punctuation that bleeds in from regex splits
         s = re.sub(r"[\s.,;]+$", "", s).strip()
         if s and s not in seen:
             seen.add(s)
@@ -114,14 +111,10 @@ def _clean_list(items: Any) -> list[str]:
 
 
 def _split_list(value: Any) -> list[str]:
-    """Like _clean_list but also splits comma/semicolon-separated strings.
-
-    Lets the user paste 'rct, cohort study; cross-sectional' as a single field.
-    """
+    """Like _clean_list but also splits comma/semicolon-separated strings."""
     if value is None:
         return []
     if isinstance(value, str):
-        # split on `,` or `;` or newlines
         parts = re.split(r"[,;\n]+", value)
         return _clean_list(parts)
     return _clean_list(value)
@@ -130,62 +123,32 @@ def _split_list(value: Any) -> list[str]:
 # ============================================================================
 # Helpers — Free-text PICOS extraction
 # ============================================================================
-# Headers we recognize. ES and EN; case-insensitive; followed by ":" or "—".
-# Order matters for greedy matching: longer first.
-# `_metadata` keys ("years", "languages") are recognized only as separators —
-# they cleanly terminate a preceding section but are NOT stored as PICOS fields.
 _PICOS_HEADERS = {
-    "population": [
-        r"population", r"poblaci[óo]n", r"participantes",
-    ],
-    "intervention": [
-        r"intervention", r"intervenci[óo]n",
-    ],
-    "comparison": [
-        r"comparator", r"comparison", r"comparaci[óo]n",
-    ],
-    "outcomes": [
-        r"outcomes?", r"resultados", r"resultados? \(outcomes\)",
-    ],
-    "study_design": [
-        r"study designs?", r"dise[ñn]o(?: de estudio)?", r"tipos? de estudio",
-    ],
-    "_years_meta": [
-        r"years?", r"a[ñn]os?",
-    ],
-    "_languages_meta": [
-        r"languages?", r"idiomas?",
-    ],
+    "population":   [r"population", r"poblaci[óo]n", r"participantes"],
+    "intervention": [r"intervention", r"intervenci[óo]n"],
+    "comparison":   [r"comparator", r"comparison", r"comparaci[óo]n"],
+    "outcomes":     [r"outcomes?", r"resultados", r"resultados? \(outcomes\)"],
+    "study_design": [r"study designs?", r"dise[ñn]o(?: de estudio)?", r"tipos? de estudio"],
+    "_years_meta":     [r"years?", r"a[ñn]os?"],
+    "_languages_meta": [r"languages?", r"idiomas?"],
 }
 
 
 def _extract_picos_sections(text: str) -> dict[str, str]:
-    """Extract PICOS sections from free text.
-
-    Returns a dict like {'population': '...', 'intervention': '...', ...}
-    with only the sections that were present and non-empty.
-
-    Strategy: build a single regex that matches ANY known header, then
-    use a sliding window to capture the text between consecutive headers.
-    Robust to ordering and to extra spacing/punctuation.
-    """
+    """Extract PICOS sections from free text."""
     if not text or len(text) < 30:
         return {}
 
-    # Build alternation of all headers, capturing which canonical key matched
-    header_alts: list[tuple[str, str]] = []  # (canonical_key, regex_alt)
+    header_alts: list[tuple[str, str]] = []
     for canon, alts in _PICOS_HEADERS.items():
         for alt in alts:
             header_alts.append((canon, alt))
 
-    # Pattern that matches "<header>" followed by ":" or "—" or "-"
-    # Captures the header itself for identification
     pattern = "|".join(
         f"(?P<h_{i}>{alt})\\s*[:\\u2014\\u2013\\-]" for i, (_, alt) in enumerate(header_alts)
     )
 
-    # Find all header matches with their positions
-    matches: list[tuple[int, int, str]] = []  # (start, end, canonical_key)
+    matches: list[tuple[int, int, str]] = []
     for m in re.finditer(pattern, text, flags=re.IGNORECASE):
         for i, (canon, _) in enumerate(header_alts):
             if m.group(f"h_{i}"):
@@ -195,32 +158,22 @@ def _extract_picos_sections(text: str) -> dict[str, str]:
     if not matches:
         return {}
 
-    # Sort by position, then extract text between consecutive headers
     matches.sort(key=lambda x: x[0])
     sections: dict[str, str] = {}
     for i, (start, end, canon) in enumerate(matches):
         next_start = matches[i + 1][0] if i + 1 < len(matches) else len(text)
         body = text[end:next_start].strip()
-        # Strip trailing punctuation / connector words at section boundary
         body = re.sub(r"[.;\s]+$", "", body)
-        # Skip _meta sections — they're separators only (years, languages)
         if canon.startswith("_") or not body:
             continue
-        if canon not in sections:  # first occurrence wins
+        if canon not in sections:
             sections[canon] = body
-
     return sections
 
 
 def _split_outcomes(text: str) -> tuple[list[str], list[str]]:
-    """Split an outcomes section into (primary, secondary) lists.
-
-    Recognizes 'Primary:'/'Primario:' and 'Secondary:'/'Secundarios:' subheaders.
-    Falls back to all-as-primary if no subheaders present.
-    """
     if not text:
         return [], []
-
     primary_pat = re.compile(
         r"(?:primary|primario|primarios)\s*[:\u2014\u2013\-]\s*(.*?)"
         r"(?=(?:secondary|secundario|secundarios)\s*[:\u2014\u2013\-]|$)",
@@ -230,13 +183,10 @@ def _split_outcomes(text: str) -> tuple[list[str], list[str]]:
         r"(?:secondary|secundario|secundarios)\s*[:\u2014\u2013\-]\s*(.*?)$",
         re.IGNORECASE | re.DOTALL,
     )
-
     p_match = primary_pat.search(text)
     s_match = secondary_pat.search(text)
-
     if not p_match and not s_match:
         return _split_list(text), []
-
     primary = _split_list(p_match.group(1)) if p_match else []
     secondary = _split_list(s_match.group(1)) if s_match else []
     return primary, secondary
@@ -245,48 +195,33 @@ def _split_outcomes(text: str) -> tuple[list[str], list[str]]:
 # ============================================================================
 # Helpers — Free-text year extraction
 # ============================================================================
-# Patterns ordered most-specific to most-generic
 _YEAR_RANGE_PATTERNS = [
-    # "between 2018 and 2025" / "entre 2018 y 2025"
     re.compile(r"(?:between|entre)\s+(\d{4})\s+(?:and|y)\s+(\d{4})", re.IGNORECASE),
-    # "2018–2025" / "2018-2025" / "2018 a 2025" / "from 2018 to 2025"
     re.compile(r"(?:from|desde)?\s*(\d{4})\s*(?:[\u2013\u2014\-–]|to|a)\s*(\d{4})", re.IGNORECASE),
 ]
 _YEAR_FROM_PATTERNS = [
-    # "since 2019" / "desde 2019" / "from 2019" / "a partir de 2019"
     re.compile(r"(?:since|desde|from|a partir de)\s+(\d{4})", re.IGNORECASE),
     re.compile(r"(?:after|despu[ée]s de|posteriores? a)\s+(\d{4})", re.IGNORECASE),
 ]
 
 
 def _extract_year_range(text: str) -> tuple[int | None, int | None]:
-    """Find a year range in free text. Returns (year_min, year_max) or (None, None).
-
-    A range pattern (e.g., '2018-2025') always wins over a from-only ('since 2019').
-    Years must be plausible (1990 ≤ y ≤ current+5).
-    """
     if not text:
         return None, None
-
     current_year = datetime.now(timezone.utc).year
     plausible = lambda y: 1990 <= y <= current_year + 5
-
-    # 1. Try ranges first
     for pat in _YEAR_RANGE_PATTERNS:
         m = pat.search(text)
         if m:
             y1, y2 = int(m.group(1)), int(m.group(2))
             if plausible(y1) and plausible(y2):
                 return (min(y1, y2), max(y1, y2))
-
-    # 2. Try "from X" patterns; year_max defaults to current
     for pat in _YEAR_FROM_PATTERNS:
         m = pat.search(text)
         if m:
             y = int(m.group(1))
             if plausible(y):
                 return (y, current_year)
-
     return None, None
 
 
@@ -302,7 +237,6 @@ _LANGUAGE_KEYWORDS = {
 
 
 def _extract_languages(text: str) -> list[str]:
-    """Detect language mentions in free text. Returns canonical names (English/Spanish/...)."""
     if not text:
         return []
     found: list[str] = []
@@ -325,10 +259,11 @@ def map_form_to_initial_state(form: FormData | dict[str, Any]) -> dict[str, Any]
     downstream nodes never KeyError. Never raises — falls through to defaults
     on malformed input.
 
-    Precedence for each field:
-      1. Explicit form value (if non-empty)
-      2. Value extracted from free text (PICOS section, year mention, lang mention)
-      3. Default constant
+    Cochrane: if `form["cochrane_mode"]` is truthy, the backend graph will
+    additionally run rob_assessor (after extractor) and grade_profiler
+    (after reconciler). The kill-switch settings.cochrane_mode_enabled
+    on the backend can still disable it server-side; either way we
+    preserve the user's intent in the state.
     """
     if not isinstance(form, dict):
         logger.warning("form_to_state: input is not a dict; returning defaults-only payload")
@@ -336,10 +271,8 @@ def map_form_to_initial_state(form: FormData | dict[str, Any]) -> dict[str, Any]
 
     question = (form.get("question") or "").strip()
 
-    # --- PICOS extraction from free text (used as 2nd-tier hints) ---
     free_text_sections = _extract_picos_sections(question)
 
-    # --- Year range: form > regex > default ---
     yr_min_form = form.get("year_min")
     yr_max_form = form.get("year_max")
     if yr_min_form and yr_max_form:
@@ -359,7 +292,6 @@ def map_form_to_initial_state(form: FormData | dict[str, Any]) -> dict[str, Any]
         )
         year_min, year_max = year_max, year_min
 
-    # --- Languages: form > regex > default ---
     langs_form = _clean_list(form.get("languages"))
     if langs_form:
         languages = langs_form
@@ -367,7 +299,6 @@ def map_form_to_initial_state(form: FormData | dict[str, Any]) -> dict[str, Any]
         langs_extracted = _extract_languages(question)
         languages = langs_extracted if langs_extracted else list(DEFAULT_LANGUAGES)
 
-    # --- PICOS fields: form takes precedence; otherwise pull from regex sections ---
     population_include = (
         _clean_list(form.get("population_include"))
         or _split_list(free_text_sections.get("population", ""))
@@ -386,7 +317,6 @@ def map_form_to_initial_state(form: FormData | dict[str, Any]) -> dict[str, Any]
         or list(DEFAULT_STUDY_DESIGN_INCLUDE)
     )
 
-    # Outcomes: try to split primary/secondary from the free-text section if needed
     outcomes_primary = _clean_list(form.get("outcomes_primary"))
     outcomes_secondary = _clean_list(form.get("outcomes_secondary"))
     if not outcomes_primary and not outcomes_secondary:
@@ -394,10 +324,16 @@ def map_form_to_initial_state(form: FormData | dict[str, Any]) -> dict[str, Any]
         outcomes_primary = op
         outcomes_secondary = os_
 
+    # Cochrane mode — boolean coercion. False is the safe default since it
+    # halves the run time. The backend re-validates this is a bool and
+    # rejects with 422 otherwise.
+    cochrane_mode = bool(form.get("cochrane_mode", False))
+
     return {
         "sr_id":  uuid.uuid4().hex[:8],
         "domain": (form.get("domain") or "general").strip() or "general",
         "question": question or "(no question provided)",
+        "cochrane_mode": cochrane_mode,
         "prisma_criteria": {
             "framework":      "PICOS",
             "prisma_version": "2020",
