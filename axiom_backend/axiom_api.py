@@ -1,7 +1,8 @@
 """
 axiom_api.py — FastAPI wrapper para el pipeline de LangGraph de Axiom.
 Implementa una cola secuencial para proteger el cap de conexiones de
-Featherless, emisión SSE en vivo, y almacenamiento de estados en disco.
+Featherless, emisión SSE en vivo, almacenamiento de estados en disco, y
+cancelación cooperativa de runs en curso.
 """
 
 import asyncio
@@ -60,6 +61,21 @@ _queue_lock = asyncio.Lock()
 # Diccionario para mapear run_id -> listas de colas (subscriptores SSE)
 _event_subscribers: Dict[str, list[asyncio.Queue]] = {}
 
+# ─── Cancelación cooperativa ─────────────────────────────────────────
+# Set de run_ids marcados para cancelar. El worker chequea esta variable
+# entre chunks del astream del grafo. Cuando un run_id está acá, el worker
+# rompe el loop después de que termine el chunk actual (cooperativo: no
+# interrumpe la llamada HTTP al LLM en curso, deja que termine).
+#
+# Por qué cooperativo y no asyncio.Task.cancel():
+#   - .cancel() dispara CancelledError en el próximo await, lo cual podría
+#     ocurrir en medio de una escritura a disco o un emit de SSE → estado
+#     inconsistente en meta.json.
+#   - El flag chequeado entre chunks da una garantía clara: "el nodo en
+#     curso termina, ningún nodo posterior arranca". Es lo que documenta
+#     el frontend al usuario.
+_cancelled_runs: set[str] = set()
+
 
 # ─── Ciclo de vida (Lifespan) ────────────────────────────────────────
 @asynccontextmanager
@@ -95,13 +111,13 @@ def require_bearer(authorization: str = Header(None)) -> None:
 # ─── Modelos Pydantic ────────────────────────────────────────────────
 class RunResponse(BaseModel):
     run_id: str
-    status: Literal["queued", "running", "done", "error"]
+    status: Literal["queued", "running", "done", "error", "cancelled"]
     queue_position: int
     created_at: str
 
 class StatusResponse(BaseModel):
     run_id: str
-    status: Literal["queued", "running", "done", "error"]
+    status: Literal["queued", "running", "done", "error", "cancelled"]
     queue_position: int
     current_node: str | None
     last_event_id: int
@@ -145,9 +161,9 @@ async def _emit_event(run_id: str, type: str, node: str | None = None,
                       message: str | None = None):
     run_dir = RUNS_DIR / run_id
     events_file = run_dir / "events.jsonl"
-    
+
     event_id = await _next_event_id(run_id)
-    
+
     event = {
         "type": type,
         "event_id": event_id,
@@ -157,14 +173,14 @@ async def _emit_event(run_id: str, type: str, node: str | None = None,
         "timestamp": time.time(),
         "level": level,
     }
-    
+
     # Escribir a disco (Durabilidad)
     with events_file.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
-    
+
     # Actualizar last_event_id en meta
     await _update_meta(run_id, last_event_id=event_id)
-    
+
     # Notificar a subscriptores SSE en vivo (Memoria)
     for q in _event_subscribers.get(run_id, []):
         try:
@@ -189,16 +205,17 @@ class SSELogHandler(logging.Handler):
         # Ignorar mensajes de debug para no saturar la UI
         if record.levelno < logging.INFO:
             return
-        
+
         msg = record.getMessage()
         level = "error" if record.levelno >= logging.ERROR else ("warn" if record.levelno == logging.WARNING else "info")
-        
+
         # Enviar el evento SSE de forma asíncrona
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(_emit_event(self.run_id, type="log", message=msg, level=level))
         except Exception:
             pass
+
 
 # ─── Ejecutor del Pipeline (Worker) ──────────────────────────────────
 async def _worker():
@@ -208,7 +225,7 @@ async def _worker():
         run_id = await _queue.get()
         async with _queue_lock:
             _current_run = run_id
-        
+
         logger.info(f"Worker iniciando run_id: {run_id}")
         try:
             await _execute_run(run_id)
@@ -219,36 +236,56 @@ async def _worker():
         finally:
             async with _queue_lock:
                 _current_run = None
+            # Limpiar la entrada de cancelados — el run terminó (sea por
+            # cancelación o por completarse). Si quedara, un futuro run con
+            # el mismo run_id (improbable pero posible con UUIDs cortos)
+            # arrancaría ya cancelado.
+            _cancelled_runs.discard(run_id)
             _queue.task_done()
+
 
 async def _execute_run(run_id: str):
     run_dir = RUNS_DIR / run_id
     initial_state = json.loads((run_dir / "initial_state.json").read_text(encoding="utf-8"))
-    
+
     await _update_meta(run_id, status="running", started_at=datetime.now(timezone.utc).isoformat())
     await _emit_event(run_id, type="agent_start", node=None, payload={
         "sr_id": initial_state.get("sr_id"),
         "cochrane_mode": bool(initial_state.get("cochrane_mode", False)),
     })
-    
+
     # --- 1. Conectar el interceptor de logs a los agentes ---
     sse_handler = SSELogHandler(run_id)
     src_logger = logging.getLogger("src") # Captura src.agents y src.tools
     src_logger.addHandler(sse_handler)
-    
+
     started = time.time()
     final_state: dict | None = None
-    
+    cancelled = False
+    last_node: str | None = None
+
     try:
         # Escuchamos los chunks (modo tuplas con "updates" y "values")
         async for mode, chunk in pipeline.astream(initial_state, stream_mode=["updates", "values"]):
+            # ─── Check de cancelación cooperativa ───────────────────
+            # Lo chequeamos al inicio de cada iteración: si el endpoint
+            # /cancel marcó este run_id, salimos del loop antes de procesar
+            # el chunk. Cualquier nodo que estaba corriendo cuando vino el
+            # cancel ya terminó (porque astream solo yieldea cuando un nodo
+            # completa) — el siguiente NO arranca.
+            if run_id in _cancelled_runs:
+                cancelled = True
+                logger.info(f"Run {run_id} cancelado cooperativamente (último nodo: {last_node})")
+                break
+
             if mode == "updates":
                 for node_name, update in chunk.items():
+                    last_node = node_name
                     await _update_meta(run_id, current_node=node_name)
-                    
+
                     # Derivar stats del nodo para la UI
                     stats = _derive_stats(node_name, update)
-                    
+
                     await _emit_event(
                         run_id,
                         type="agent_done",
@@ -260,24 +297,56 @@ async def _execute_run(run_id: str):
                         },
                         level="success"
                     )
-                    # (ELIMINADO: el log genérico de "Agente finalizó su tarea")
-                    
+
             elif mode == "values":
                 final_state = chunk  # Snapshot completo del estado hasta este punto
 
-        if final_state:
+        # ─── Cierre: cancelado vs. completado ───────────────────────
+        if cancelled:
+            # Persistir lo que tengamos hasta ahora (puede servir para auditoría).
+            if final_state:
+                (run_dir / "final_state.json").write_text(
+                    json.dumps(final_state, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            await _update_meta(
+                run_id,
+                status="cancelled",
+                ended_at=datetime.now(timezone.utc).isoformat(),
+                last_node=last_node,
+            )
+            await _emit_event(
+                run_id,
+                type="cancelled",
+                payload={"run_id": run_id, "last_node": last_node,
+                         "duration_s": round(time.time() - started, 1)},
+                level="warn",
+            )
+            # Emitimos también `finished` para que los consumidores SSE
+            # genéricos (que cierran al ver finished/error) no se queden
+            # colgados — usamos level=warn para distinguirlo de éxito.
+            await _emit_event(
+                run_id,
+                type="finished",
+                payload={"cancelled": True, "last_node": last_node},
+                level="warn",
+            )
+            logger.info(f"Run {run_id} marcado como cancelado tras {round(time.time() - started, 1)}s")
+
+        elif final_state:
             (run_dir / "final_state.json").write_text(json.dumps(final_state, ensure_ascii=False, indent=2), encoding="utf-8")
             await _update_meta(run_id, status="done", ended_at=datetime.now(timezone.utc).isoformat())
-            
+
             await _emit_event(run_id, type="finished", payload={
                 "sr_id": final_state.get("sr_id", run_id),
                 "duration_s": round(time.time() - started, 1),
             }, level="success")
             logger.info(f"Run {run_id} finalizado exitosamente en {round(time.time() - started, 1)}s")
-            
+
     finally:
         # --- 2. Desconectar el interceptor al terminar (Evita memoria zombie) ---
         src_logger.removeHandler(sse_handler)
+
 
 def _derive_stats(node_name: str, update: dict) -> dict:
     if node_name == "searcher":
@@ -386,7 +455,7 @@ async def submit_run(request: Request, _: None = Depends(require_bearer)):
         initial_state = await request.json()
     except Exception:
         raise HTTPException(422, "Invalid JSON body")
-        
+
     # Validaciones básicas
     if not isinstance(initial_state, dict):
         raise HTTPException(422, "initial_state must be a JSON object")
@@ -414,19 +483,19 @@ async def submit_run(request: Request, _: None = Depends(require_bearer)):
     run_id = uuid.uuid4().hex[:8]
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    
+
     now = datetime.now(timezone.utc).isoformat()
-    
+
     (run_dir / "initial_state.json").write_text(json.dumps(initial_state, ensure_ascii=False), encoding="utf-8")
     (run_dir / "events.jsonl").touch()
     await _update_meta(run_id, status="queued", created_at=now, last_event_id=0,
                        cochrane_mode=cochrane_raw)
 
     _queue.put_nowait(run_id)
-    
+
     pos = _queue_position(run_id)
     logger.info(f"POST /pipeline/start -> run_id={run_id} cochrane={cochrane_raw} queue_position={pos}")
-    
+
     return RunResponse(
         run_id=run_id,
         status="queued",
@@ -434,17 +503,85 @@ async def submit_run(request: Request, _: None = Depends(require_bearer)):
         created_at=now
     )
 
+
+@app.post("/pipeline/{run_id}/cancel")
+async def cancel_run(run_id: str, _: None = Depends(require_bearer)):
+    """Cancelación cooperativa de un run en curso o encolado.
+
+    Comportamiento:
+      • Si el run no existe                       → 404
+      • Si el run ya terminó (done/error/cancelled) → 409
+      • Si el run está corriendo o encolado       → 202 {status: "cancelling"}
+
+    Cómo funciona internamente:
+      1. Agrega run_id a `_cancelled_runs`.
+      2. Si el run está encolado: lo dejamos pasar; cuando el worker lo
+         saque, en la primera iteración del astream el flag lo aborta antes
+         de procesar nada y se marca como cancelled.
+      3. Si el run está corriendo: el worker chequea el flag entre chunks
+         del astream. El nodo en curso termina su llamada actual al LLM
+         (no se puede interrumpir HTTP mid-flight), el siguiente NO arranca.
+
+    La latencia entre POST /cancel y el evento SSE `cancelled` depende del
+    tiempo que tarde el nodo en curso en completar — típicamente segundos
+    para searcher/screener, hasta ~3min para nodos LLM pesados como
+    rob_assessor o grade_profiler. El frontend muestra "Cancelando…"
+    durante este intervalo.
+    """
+    run_dir = RUNS_DIR / run_id
+    if not run_dir.exists():
+        raise HTTPException(404, "run_id not found")
+
+    meta_path = run_dir / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(404, "run metadata missing")
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    current_status = meta.get("status")
+
+    # Idempotencia: si ya está cancelado, devolvemos 200 con el mismo body
+    # que el endpoint emite normalmente — el cliente puede reintentar.
+    if current_status == "cancelled":
+        return JSONResponse(
+            status_code=200,
+            content={"status": "cancelled", "run_id": run_id},
+        )
+
+    # Estados terminales: no se puede cancelar lo que ya terminó.
+    if current_status in ("done", "error"):
+        raise HTTPException(409, f"Run already in terminal state: {current_status}")
+
+    _cancelled_runs.add(run_id)
+    logger.info(f"POST /pipeline/{run_id}/cancel -> queued cooperative cancel (status was {current_status})")
+
+    # Para runs encolados (aún no arrancaron) emitimos un evento ahora —
+    # el worker lo verá igualmente cuando lo saque de la cola, pero un
+    # cliente conectado al SSE estream debería ver la respuesta inmediata.
+    if current_status == "queued":
+        await _emit_event(
+            run_id,
+            type="log",
+            message="Cancelación recibida antes de iniciar el run.",
+            level="warn",
+        )
+
+    return JSONResponse(
+        status_code=202,
+        content={"status": "cancelling", "run_id": run_id},
+    )
+
+
 @app.get("/pipeline/stream/{run_id}")
 async def stream_events(run_id: str, since_event_id: int = 0, _: None = Depends(require_bearer)):
     run_dir = RUNS_DIR / run_id
     if not run_dir.exists():
         raise HTTPException(404, "Run ID not found")
-        
+
     async def event_generator():
         # 1. Replay histórico desde disco
         events_file = run_dir / "events.jsonl"
         run_finished = False
-        
+
         if events_file.exists():
             for line in events_file.read_text(encoding="utf-8").splitlines():
                 if not line.strip(): continue
@@ -453,7 +590,7 @@ async def stream_events(run_id: str, since_event_id: int = 0, _: None = Depends(
                     yield _format_sse(event)
                 if event["type"] in ("finished", "error"):
                     run_finished = True
-        
+
         if run_finished:
             return  # Cortamos la conexión si ya terminó
 
@@ -475,35 +612,45 @@ async def stream_events(run_id: str, since_event_id: int = 0, _: None = Depends(
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+
 @app.get("/pipeline/result/{run_id}")
 async def fetch_result(run_id: str, _: None = Depends(require_bearer)):
     run_dir = RUNS_DIR / run_id
     if not run_dir.exists():
         raise HTTPException(404, "Run ID not found")
-        
+
     meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
-    
+
     if meta.get("status") == "error":
         raise HTTPException(500, detail={"status": "error", "error": meta.get("error")})
-        
+
+    if meta.get("status") == "cancelled":
+        # Cancelled runs no tienen final_state completo — devolvemos 409
+        # con info de hasta qué nodo llegamos para que el cliente decida.
+        return JSONResponse(
+            status_code=409,
+            content={"status": "cancelled", "last_node": meta.get("last_node")},
+        )
+
     if meta.get("status") != "done":
         return JSONResponse(status_code=202, content={"status": meta.get("status")})
-        
+
     final_state_path = run_dir / "final_state.json"
     if not final_state_path.exists():
         raise HTTPException(404, "Final state not found despite status done")
-        
+
     final_state = json.loads(final_state_path.read_text(encoding="utf-8"))
     return _adapt_final_state_for_ui(final_state)
+
 
 @app.get("/pipeline/{run_id}/status", response_model=StatusResponse)
 async def fetch_status(run_id: str, _: None = Depends(require_bearer)):
     run_dir = RUNS_DIR / run_id
     if not run_dir.exists():
         raise HTTPException(404, "Run ID not found")
-        
+
     meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
-    
+
     return StatusResponse(
         run_id=run_id,
         status=meta.get("status", "queued"),
@@ -515,6 +662,7 @@ async def fetch_status(run_id: str, _: None = Depends(require_bearer)):
         ended_at=meta.get("ended_at")
     )
 
+
 @app.get("/pipeline/{run_id}/report.pdf")
 async def fetch_report_pdf(run_id: str, _: None = Depends(require_bearer)):
     """Addendum: Endpoint para servir el PDF generado."""
@@ -525,7 +673,7 @@ async def fetch_report_pdf(run_id: str, _: None = Depends(require_bearer)):
     meta_path = run_dir / "meta.json"
     if not meta_path.exists():
         raise HTTPException(404, "run metadata missing")
-    
+
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
 
     if meta.get("status") != "done":
@@ -537,7 +685,7 @@ async def fetch_report_pdf(run_id: str, _: None = Depends(require_bearer)):
 
     final_state = json.loads(final_state_path.read_text(encoding="utf-8"))
     pdf_path_str = final_state.get("executive_report_pdf_path")
-    
+
     if not pdf_path_str:
         raise HTTPException(404, "pdf_not_available")
 
@@ -552,9 +700,16 @@ async def fetch_report_pdf(run_id: str, _: None = Depends(require_bearer)):
         filename=f"Axiom_Report_{sr_id}.pdf",
     )
 
+
 @app.get("/pipeline/{run_id}/apa7.pdf")
 async def fetch_apa7_pdf_endpoint(run_id: str, _: None = Depends(require_bearer)):
-    """Endpoint para servir el PDF del borrador APA 7 generado por writer.py."""
+    """Endpoint para servir el PDF del borrador APA 7.
+
+    DEPRECATED: tras la refactorización del writer a un solo PDF unificado
+    (`executive_report_pdf_path`), `apa7_pdf_path` ya no se setea — este
+    endpoint siempre devuelve 404 en runs nuevos. Lo mantenemos para no
+    romper clientes que aún lo llaman.
+    """
     run_dir = RUNS_DIR / run_id
     if not run_dir.exists():
         raise HTTPException(404, "run_id not found")
@@ -562,7 +717,7 @@ async def fetch_apa7_pdf_endpoint(run_id: str, _: None = Depends(require_bearer)
     meta_path = run_dir / "meta.json"
     if not meta_path.exists():
         raise HTTPException(404, "run metadata missing")
-    
+
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
 
     if meta.get("status") != "done":
@@ -573,10 +728,10 @@ async def fetch_apa7_pdf_endpoint(run_id: str, _: None = Depends(require_bearer)
         raise HTTPException(404, "final_state not found")
 
     final_state = json.loads(final_state_path.read_text(encoding="utf-8"))
-    
+
     # ⚠️ Clave exacta que emite writer.py
-    pdf_path_str = final_state.get("apa7_pdf_path") 
-    
+    pdf_path_str = final_state.get("apa7_pdf_path")
+
     if not pdf_path_str:
         raise HTTPException(404, "pdf_not_available")
 
@@ -590,6 +745,7 @@ async def fetch_apa7_pdf_endpoint(run_id: str, _: None = Depends(require_bearer)
         media_type="application/pdf",
         filename=f"Axiom_APA7_{sr_id}.pdf",
     )
+
 
 @app.get("/healthz")
 async def healthz():
@@ -607,6 +763,7 @@ async def healthz():
         "status": "ok",
         "queue_depth": _queue.qsize(),
         "queue_max":   settings.max_queue_size,
+        "cancelling_runs": len(_cancelled_runs),
         "llm_provider": "featherless",
         "llm_base_url": settings.featherless_base_url,
         "models": {
