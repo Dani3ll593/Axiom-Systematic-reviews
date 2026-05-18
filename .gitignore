@@ -62,3 +62,4 @@ migrate_imports.sh
 # MacOS / Windows OS files
 .DS_Store
 Thumbs.db
+secrets.toml
