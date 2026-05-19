@@ -34,7 +34,7 @@ Produce ONE markdown string with this **single** section. Use the heading level 
 
 ```
 ## Discussion
-[Extensive interpretation of the findings across multiple long paragraphs. Connect the synthesis back to the original research question. Provide a granular analysis of methodological heterogeneity. Contrast the success/failure of different interventions. If Risk of Bias or GRADE certainty data is present, analyze how those biases affect the reliability of the findings. Discuss what the body of evidence collectively implies for theory and practice.]
+[Extensive interpretation of the findings across multiple long paragraphs (12-15). Connect the synthesis back to the original research question. Provide a granular analysis of methodological heterogeneity. Contrast the success/failure of different interventions. If Risk of Bias or GRADE certainty data is present, analyze how those biases affect the reliability of the findings. Discuss what the body of evidence collectively implies for theory and practice.]
 ```
 
 # 🔄 CITATION RULES (CRITICAL)

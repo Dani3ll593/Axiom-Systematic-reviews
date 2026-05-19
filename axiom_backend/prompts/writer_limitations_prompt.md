@@ -34,7 +34,7 @@ Produce ONE markdown string with these **two** sections, in this order. Use head
 
 ```
 ## Limitations of the Evidence Base
-[Multiple paragraphs. Acknowledge restricted-access papers (if any are flagged in the inputs), gaps in temporal/population coverage, methodological constraints (e.g., heterogeneous outcome measures, lack of longitudinal data), and sample size limitations across the included studies. Be specific: tie limitations to specific clusters or studies where appropriate, with inline citations. This is about the EVIDENCE BASE, not about your writing process.]
+[Multiple detailed paragraphs (12-15). Acknowledge restricted-access papers (if any are flagged in the inputs), gaps in temporal/population coverage, methodological constraints (e.g., heterogeneous outcome measures, lack of longitudinal data), and sample size limitations across the included studies. Be specific: tie limitations to specific clusters or studies where appropriate, with inline citations. This is about the EVIDENCE BASE, not about your writing process.]
 
 ## Future Research Directions
 [Use a numbered list. Each verified gap from the input becomes one numbered recommendation. For each item, provide a 2–3 sentence rationale explaining what the gap is, why filling it matters, and what a future study should look like (population, design, outcome) to address it. Do NOT invent gaps beyond those provided.]

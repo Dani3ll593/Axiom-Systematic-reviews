@@ -250,70 +250,84 @@ def render_screen_results() -> None:
 
         tabs = st.tabs(tab_labels)
 
+        # Altura fija para los 4 tabs. Mantiene los botones de "Nueva revisión"
+        # y "Exportar" visibles sin tener que scrollear toda la página. 600px
+        # cae bien en laptops; en pantallas grandes queda holgado y en
+        # pequeñas el scroll interno hace el trabajo.
+        TAB_HEIGHT = 600
+
         # Tab 1 — report
         with tabs[0]:
-            if state["report_md"].strip():
-                st.markdown(state["report_md"])
-            else:
-                st.info(t("results.error.no_results"))
+            with st.container(height=TAB_HEIGHT, border=False):
+                if state["report_md"].strip():
+                    # unsafe_allow_html=True es REQUERIDO porque el writer
+                    # emite HTML inline (<em> para itálicos APA 7, <div
+                    # class="reference-item"> para la sangría francesa).
+                    # Sin esto, las referencias salen con HTML crudo visible.
+                    st.markdown(state["report_md"], unsafe_allow_html=True)
+                else:
+                    st.info(t("results.error.no_results"))
 
         # Tab 2 — gaps
         with tabs[1]:
-            if not state["gaps"]:
-                st.info(t("results.error.no_results"))
-            else:
-                for i, gap in enumerate(state["gaps"], 1):
-                    color = gap.get("color") or _GAP_COLORS[(i - 1) % len(_GAP_COLORS)]
-                    cat = gap.get("category", f"Gap {i}")
-                    desc = gap.get("description", "")
-                    st.markdown(
-                        f'<div style="border-left:3px solid {color};padding:14px 16px;'
-                        f'background:rgba(9,15,31,0.4);border-radius:0 8px 8px 0;margin-bottom:10px;">'
-                        f'<span style="font-size:10px;font-family:Space Mono,monospace;color:{color};'
-                        f'background:{color}18;border:1px solid {color}40;padding:2px 8px;'
-                        f'border-radius:4px;letter-spacing:0.08em;">'
-                        f'{t("results.gap.label", i=i, category=cat.upper())}</span>'
-                        f'<p style="font-size:13px;color:var(--text-secondary);line-height:1.6;'
-                        f'margin-top:8px;">{desc}</p>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
+            with st.container(height=TAB_HEIGHT, border=False):
+                if not state["gaps"]:
+                    st.info(t("results.error.no_results"))
+                else:
+                    for i, gap in enumerate(state["gaps"], 1):
+                        color = gap.get("color") or _GAP_COLORS[(i - 1) % len(_GAP_COLORS)]
+                        cat = gap.get("category", f"Gap {i}")
+                        desc = gap.get("description", "")
+                        st.markdown(
+                            f'<div style="border-left:3px solid {color};padding:14px 16px;'
+                            f'background:rgba(9,15,31,0.4);border-radius:0 8px 8px 0;margin-bottom:10px;">'
+                            f'<span style="font-size:10px;font-family:Space Mono,monospace;color:{color};'
+                            f'background:{color}18;border:1px solid {color}40;padding:2px 8px;'
+                            f'border-radius:4px;letter-spacing:0.08em;">'
+                            f'{t("results.gap.label", i=i, category=cat.upper())}</span>'
+                            f'<p style="font-size:13px;color:var(--text-secondary);line-height:1.6;'
+                            f'margin-top:8px;">{desc}</p>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
 
         # Tab 3 — restricted
         with tabs[2]:
-            if not state["restricted_papers"]:
-                st.success("—")
-            else:
-                st.warning(t("results.restricted.warn", n=stats['restricted']))
-                for paper in state["restricted_papers"]:
-                    title   = paper.get("title", "—")
-                    journal = paper.get("journal", "—")
-                    doi     = paper.get("doi", "—")
-                    oa_url  = paper.get("oa_url")
-                    oa_badge = (
-                        f'<span style="font-size:11px;color:#38d9b4;background:rgba(56,217,180,0.1);'
-                        f'padding:2px 8px;border-radius:4px;border:1px solid rgba(56,217,180,0.3);">'
-                        f'{t("results.restricted.oa_yes")}</span>'
-                        if oa_url
-                        else f'<span style="font-size:11px;color:#f06070;background:rgba(240,96,112,0.08);'
-                             f'padding:2px 8px;border-radius:4px;border:1px solid rgba(240,96,112,0.2);">'
-                             f'{t("results.restricted.oa_no")}</span>'
-                    )
-                    st.markdown(
-                        f'<div style="background:rgba(9,15,31,0.5);border:1px solid rgba(77,166,255,0.1);'
-                        f'border-radius:8px;padding:14px 16px;margin-bottom:10px;">'
-                        f'<div style="font-size:13px;font-weight:500;color:var(--text-primary);margin-bottom:6px;">{title}</div>'
-                        f'<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">'
-                        f'<span style="font-family:Space Mono,monospace;font-size:11px;color:var(--text-muted);">{journal}</span>'
-                        f'<span style="font-family:Space Mono,monospace;font-size:11px;color:var(--text-muted);">{doi}</span>'
-                        f'{oa_badge}</div></div>',
-                        unsafe_allow_html=True,
-                    )
+            with st.container(height=TAB_HEIGHT, border=False):
+                if not state["restricted_papers"]:
+                    st.success("—")
+                else:
+                    st.warning(t("results.restricted.warn", n=stats['restricted']))
+                    for paper in state["restricted_papers"]:
+                        title   = paper.get("title", "—")
+                        journal = paper.get("journal", "—")
+                        doi     = paper.get("doi", "—")
+                        oa_url  = paper.get("oa_url")
+                        oa_badge = (
+                            f'<span style="font-size:11px;color:#38d9b4;background:rgba(56,217,180,0.1);'
+                            f'padding:2px 8px;border-radius:4px;border:1px solid rgba(56,217,180,0.3);">'
+                            f'{t("results.restricted.oa_yes")}</span>'
+                            if oa_url
+                            else f'<span style="font-size:11px;color:#f06070;background:rgba(240,96,112,0.08);'
+                                 f'padding:2px 8px;border-radius:4px;border:1px solid rgba(240,96,112,0.2);">'
+                                 f'{t("results.restricted.oa_no")}</span>'
+                        )
+                        st.markdown(
+                            f'<div style="background:rgba(9,15,31,0.5);border:1px solid rgba(77,166,255,0.1);'
+                            f'border-radius:8px;padding:14px 16px;margin-bottom:10px;">'
+                            f'<div style="font-size:13px;font-weight:500;color:var(--text-primary);margin-bottom:6px;">{title}</div>'
+                            f'<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">'
+                            f'<span style="font-family:Space Mono,monospace;font-size:11px;color:var(--text-muted);">{journal}</span>'
+                            f'<span style="font-family:Space Mono,monospace;font-size:11px;color:var(--text-muted);">{doi}</span>'
+                            f'{oa_badge}</div></div>',
+                            unsafe_allow_html=True,
+                        )
 
         # Tab 4 — RoB & GRADE (Cochrane only)
         if state["cochrane_mode"]:
             with tabs[3]:
-                _render_rob_grade_tab(state["consensus_clusters"], state["rob_assessments"])
+                with st.container(height=TAB_HEIGHT, border=False):
+                    _render_rob_grade_tab(state["consensus_clusters"], state["rob_assessments"])
 
     # ─── Side column — exports + pipeline info ──────────────────────
     with side_col:
@@ -491,22 +505,51 @@ def _render_rob_grade_tab(
         ("D5", "domain_5_reporting"),
     ]
 
-    header = (
-        f"| {t('rg.rob.paper')} | {t('rg.rob.d1')} | {t('rg.rob.d2')} | "
-        f"{t('rg.rob.d3')} | {t('rg.rob.d4')} | {t('rg.rob.d5')} | {t('rg.rob.overall')} |\n"
-        "|---|---|---|---|---|---|---|"
-    )
-    rows = [header]
+    # Compact summary table — usamos HTML literal (<table>) en vez de
+    # tabla Markdown (| col | col |) porque st.markdown NO renderiza HTML
+    # embebido dentro de celdas de tablas Markdown, aunque pasemos
+    # unsafe_allow_html=True. Los dots de _rob_dot() son <span> con styling
+    # y necesitan ser HTML reales para verse como dots y no como código.
+    table_parts = [
+        '<table style="width:100%;border-collapse:collapse;font-size:12px;'
+        'margin:8px 0 20px 0;color:var(--text-secondary);">',
+        '<thead><tr>',
+    ]
+    for h in (
+        t("rg.rob.paper"),
+        t("rg.rob.d1"), t("rg.rob.d2"), t("rg.rob.d3"),
+        t("rg.rob.d4"), t("rg.rob.d5"),
+        t("rg.rob.overall"),
+    ):
+        table_parts.append(
+            f'<th style="text-align:left;padding:8px 10px;border-bottom:1px solid '
+            f'rgba(77,166,255,0.2);font-weight:600;color:var(--text-primary);">{h}</th>'
+        )
+    table_parts.append('</tr></thead><tbody>')
+
     for r in rob_assessments:
         paper_id = r.get("paper_id", "—")
-        cells = [f"`{paper_id}`"]
+        table_parts.append('<tr>')
+        table_parts.append(
+            f'<td style="padding:8px 10px;border-bottom:1px solid rgba(77,166,255,0.08);">'
+            f'<code style="background:rgba(56,217,180,0.08);color:#38d9b4;padding:2px 6px;'
+            f'border-radius:3px;font-size:11px;">{paper_id}</code></td>'
+        )
         for _label, key in domain_keys:
             j = (r.get(key) or {}).get("judgment", "—")
-            cells.append(_rob_dot(j))
+            table_parts.append(
+                f'<td style="padding:8px 10px;border-bottom:1px solid rgba(77,166,255,0.08);'
+                f'text-align:center;">{_rob_dot(j)}</td>'
+            )
         overall_j = (r.get("overall") or {}).get("judgment", "—")
-        cells.append(_rob_dot(overall_j, with_label=True))
-        rows.append("| " + " | ".join(cells) + " |")
-    st.markdown("\n".join(rows))
+        table_parts.append(
+            f'<td style="padding:8px 10px;border-bottom:1px solid rgba(77,166,255,0.08);">'
+            f'{_rob_dot(overall_j, with_label=True)}</td>'
+        )
+        table_parts.append('</tr>')
+
+    table_parts.append('</tbody></table>')
+    st.markdown("".join(table_parts), unsafe_allow_html=True)
 
     # Per-paper rationale expanders
     for r in rob_assessments:

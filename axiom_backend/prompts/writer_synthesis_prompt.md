@@ -34,7 +34,7 @@ Produce ONE markdown string with these **two** sections, in this order. Use head
 [1-2 paragraphs: research question, headline finding, scope of evidence. Keep this section concise.]
 
 ## Synthesis of Findings
-[Write an extensive, deeply detailed section (multiple long paragraphs). Do not just state the consensus; dissect the evidence. Break down the clusters by detailing the individual papers within them. Expose specific studies: detail their methodologies, specific interventions, and precise outcomes. Where clusters disagree, explore the contradiction deeply using the contradiction quotes provided. Analyze why they might differ (e.g., different dosages, populations, or study designs).]
+[Write an extensive, deeply detailed section (at least 12-15 long paragraphs). Do not just state the consensus; dissect the evidence. Break down the clusters by detailing the individual papers within them. Expose specific studies: detail their methodologies, specific interventions, and precise outcomes. Where clusters disagree, explore the contradiction deeply using the contradiction quotes provided. Analyze why they might differ (e.g., different dosages, populations, or study designs).]
 ```
 
 # 🔄 CITATION RULES (CRITICAL)

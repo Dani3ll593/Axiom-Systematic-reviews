@@ -6,9 +6,7 @@ import logging
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
-
 from pydantic import BaseModel, ValidationError
-
 from axiom_backend.state import AxiomState
 from axiom_backend.config import settings
 from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response, featherless_credit, COST_32B
@@ -18,6 +16,7 @@ from axiom_backend.prompts import (
     WRITER_LIMITATIONS_PROMPT,
     WRITER_APA7_RULES,
 )
+from axiom_backend.utils.language import resolve_output_language
 
 logger = logging.getLogger(__name__)
 
@@ -503,7 +502,7 @@ def _build_writer_payload(state: AxiomState) -> tuple[dict, dict, str]:
         "references_table":   references_table,
     }
 
-    return payload, references_table, _detect_language(question)
+    return payload, references_table, resolve_output_language(state)
 
 
 async def writer_synthesis_node(state: AxiomState) -> dict:
@@ -881,8 +880,8 @@ async def writer_tables_node(state: AxiomState) -> dict:
     extractions      = state.get("extractions", []) or []
     question         = state.get("question", "")
 
-    lang = _detect_language(question)
-    L = _TABLE_LABELS.get(_detect_language(question), _TABLE_LABELS["English"])
+    lang = resolve_output_language(state)
+    L = _TABLE_LABELS.get(lang, _TABLE_LABELS["English"])
     R = _REASON_TRANSLATIONS.get(lang, _REASON_TRANSLATIONS["English"])
 
     references_table = _build_references_table(screened_papers)
@@ -1001,7 +1000,7 @@ async def writer_references_node(state: AxiomState) -> dict:
     """
     screened = state.get("screened_papers", []) or []
     question = state.get("question", "")
-    L = _REFERENCES_LABELS.get(_detect_language(question), _REFERENCES_LABELS["English"])
+    L = _REFERENCES_LABELS.get(resolve_output_language(state), _REFERENCES_LABELS["English"])
 
     included   = [p for p in screened if p.get("is_open")]
     restricted = [p for p in screened if not p.get("is_open")]

@@ -351,7 +351,13 @@ async def _execute_run(run_id: str):
 def _derive_stats(node_name: str, update: dict) -> dict:
     if node_name == "searcher":
         return {"papers_found": len(update.get("papers_found", []))}
-    if node_name == "screener":
+    # El grafo emite dos nodos screener (cascada 7B → 32B). Ambos escriben
+    # al mismo state field, así que cada uno reporta los conteos acumulados.
+    # El UI los colapsa en una sola fila ("screener" en NODE_TO_UI) y mergea
+    # los stats; cuando llega screener_32b, los conteos finales sobrescriben
+    # los del 7B. Si solo corrió el 7B (sin dudosos para escalar), también
+    # quedan reflejados los conteos correctamente.
+    if node_name in ("screener", "screener_7b", "screener_32b"):
         return {
             "included":  len(update.get("screened_papers", [])),
             "excluded":  len(update.get("papers_excluded", [])),
@@ -379,7 +385,16 @@ def _derive_stats(node_name: str, update: dict) -> dict:
         return {"clusters_graded": n_graded, "clusters_total": len(clusters)}
     if node_name == "gapfinder":
         return {"gaps": len(update.get("research_gaps", []))}
-    if node_name == "writer":
+    # El writer ahora son 6 sub-nodos secuenciales que escriben distintas
+    # keys del state. La UI los colapsa en una sola fila y muestra "Reporte
+    # ensamblado" cuando termina el assembler. Para los nodos intermedios
+    # devolvemos stats incrementales pero el frontend los ignora (no hay
+    # texto i18n específico, solo el "Reporte ensamblado" final).
+    if node_name in (
+        "writer", "writer_synthesis", "writer_discussion",
+        "writer_limitations", "writer_tables", "writer_references",
+        "writer_assembler",
+    ):
         return {
             "report_length": len(update.get("executive_report_md") or ""),
             "apa7_length":   len(update.get("apa7_literature_review") or ""),
@@ -473,6 +488,23 @@ async def submit_run(request: Request, _: None = Depends(require_bearer)):
         raise HTTPException(422, "cochrane_mode must be a boolean")
     initial_state["cochrane_mode"] = cochrane_raw
 
+    # output_language es opcional. Default "auto" → backend autodetect.
+    # Si viene presente, debe ser uno de {"auto", "English", "Spanish"} (los
+    # idiomas soportados hoy; ampliable cuando agreguemos PT/FR). Frontend
+    # nunca debería mandar otra cosa, pero validamos defensivamente para no
+    # propagar valores raros al state del grafo.
+    lang_raw = initial_state.get("output_language", "auto")
+    if not isinstance(lang_raw, str):
+        raise HTTPException(422, "output_language must be a string")
+    lang_normalized = lang_raw.strip() or "auto"
+    if lang_normalized not in ("auto", "English", "Spanish"):
+        raise HTTPException(
+            422,
+            f"output_language must be one of 'auto', 'English', 'Spanish' "
+            f"(got {lang_raw!r})",
+        )
+    initial_state["output_language"] = lang_normalized
+
     body_bytes = await request.body()
     if len(body_bytes) > 100_000:
         raise HTTPException(413, "Payload too large")
@@ -489,12 +521,15 @@ async def submit_run(request: Request, _: None = Depends(require_bearer)):
     (run_dir / "initial_state.json").write_text(json.dumps(initial_state, ensure_ascii=False), encoding="utf-8")
     (run_dir / "events.jsonl").touch()
     await _update_meta(run_id, status="queued", created_at=now, last_event_id=0,
-                       cochrane_mode=cochrane_raw)
+                       cochrane_mode=cochrane_raw, output_language=lang_normalized)
 
     _queue.put_nowait(run_id)
 
     pos = _queue_position(run_id)
-    logger.info(f"POST /pipeline/start -> run_id={run_id} cochrane={cochrane_raw} queue_position={pos}")
+    logger.info(
+        f"POST /pipeline/start -> run_id={run_id} "
+        f"cochrane={cochrane_raw} lang={lang_normalized} queue_position={pos}"
+    )
 
     return RunResponse(
         run_id=run_id,

@@ -51,7 +51,6 @@ data/datasets/
 .env
 smoke_test.sh
 evaluate_pipeline.py
-main.py
 hf_cache
 data
 test

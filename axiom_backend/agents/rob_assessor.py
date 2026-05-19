@@ -8,7 +8,9 @@ cuando state["cochrane_mode"] == True (la decisión la toma el grafo, no
 este nodo). Si state.cochrane_mode es False, este nodo no se invoca.
 
 Reads:
-    state["extractions"]: list[dict]
+    state["extractions"]:     list[dict]
+    state["question"]:        str   (para autodetect de idioma)
+    state["output_language"]: str   (opcional; "English"/"Spanish"/"auto")
 
 Writes:
     state["rob_assessments"]: list[dict]  (Annotated con operator.add)
@@ -25,6 +27,11 @@ Writes:
 
 El downstream grade_profiler hace lookup por paper_id, no por índice — el
 orden de la lista no importa.
+
+Las `rationale` salen en `output_language` (English o Spanish). El resto
+de campos (judgment values: "low"/"some"/"high"/"n/a") son enums que NO
+se traducen — son parte del contrato y el frontend los mapea a labels
+localizados vía i18n.
 """
 
 import asyncio
@@ -37,6 +44,7 @@ from axiom_backend.state import AxiomState
 from axiom_backend.config import settings
 from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response, featherless_credit, COST_32B
 from axiom_backend.prompts import ROB_ASSESSOR_PROMPT
+from axiom_backend.utils.language import resolve_output_language
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +58,17 @@ MAX_CONCURRENT_PAPERS = 1   # Featherless Premium: el 32B cuesta 2 units.
 
 # DeepSeek-R1 razonando un paper completo: 60-90s típico. Margen para outliers.
 TIMEOUT_S = settings.cochrane_rob_timeout_s
+
+
+# ─── Lenguaje de salida ─────────────────────────────────────────────
+# El prompt rob_assessor_prompt.md contiene placeholders {output_language}
+# en su sección "OUTPUT LANGUAGE" y en cada rationale del JSON. Los
+# reemplazamos antes de la llamada, igual que hace writer.py con
+# WRITER_SYNTHESIS_PROMPT. La instrucción queda en el system prompt
+# principal, no en un segundo message — los enums (judgment values
+# "low"/"some"/"high"/"n/a") NO se traducen, eso queda explícito en el
+# prompt y reforzado por el Pydantic schema que solo acepta esos literales.
+
 
 # --- Esquema (espejo del rob_assessor_prompt.txt) ---
 class Judgment(BaseModel):
@@ -119,11 +138,18 @@ def _prune_for_rob(paper: dict) -> dict:
     }
 
 
-async def _assess_paper(paper: dict) -> dict | None:
+async def _assess_paper(paper: dict, output_language: str) -> dict | None:
     """Evalúa un paper. Devuelve el dict con paper_id + 6 domains, o None si falla."""
     paper_id = paper.get("paper_id", "<unknown>")
     pruned = _prune_for_rob(paper)
     user_msg = f"PAPER TO ASSESS:\n{json.dumps(pruned, ensure_ascii=False)}"
+
+    # Inyectar el idioma en el prompt antes de la llamada. Mismo patrón que
+    # writer.py — un solo replace en el template del .md. El prompt tiene
+    # múltiples ocurrencias de {output_language} (en la sección OUTPUT
+    # LANGUAGE, en cada rationale del JSON template, y en CONSTRAINTS);
+    # .replace() las reemplaza todas en un solo paso.
+    system_prompt = ROB_ASSESSOR_PROMPT.replace("{output_language}", output_language)
 
     try:
         # Cap global de Featherless: 32B cuesta 2 units.
@@ -132,7 +158,7 @@ async def _assess_paper(paper: dict) -> dict | None:
                 LLM_32B.chat.completions.create(
                     model=settings.model_32b_name,
                     messages=[
-                        {"role": "system", "content": ROB_ASSESSOR_PROMPT},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user",   "content": user_msg},
                     ],
                     # Bajo temp: queremos juicios consistentes, no creatividad.
@@ -186,16 +212,22 @@ async def run_rob_assessor(state: AxiomState) -> dict:
         logger.warning("rob_assessor: No extractions to assess.")
         return {"rob_assessments": []}
 
+    # Idioma: respeta state["output_language"] si vino explícito, si no
+    # autodetecta de state["question"]. Centralizado en utils/language.py
+    # para que rob_assessor, grade_profiler y writer usen exactamente la
+    # misma lógica.
+    output_language = resolve_output_language(state)
+
     logger.info(
-        "rob_assessor: evaluando %d papers con RoB 2.0 (concurrent=%d, timeout=%.0fs)...",
-        len(extractions), MAX_CONCURRENT_PAPERS, TIMEOUT_S,
+        "rob_assessor: evaluando %d papers con RoB 2.0 (concurrent=%d, timeout=%.0fs, lang=%s)...",
+        len(extractions), MAX_CONCURRENT_PAPERS, TIMEOUT_S, output_language,
     )
 
     sem = asyncio.Semaphore(MAX_CONCURRENT_PAPERS)
 
     async def _gated(paper):
         async with sem:
-            return await _assess_paper(paper)
+            return await _assess_paper(paper, output_language)
 
     results = await asyncio.gather(
         *[_gated(p) for p in extractions],

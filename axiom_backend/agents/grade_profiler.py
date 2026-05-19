@@ -10,6 +10,8 @@ Reads:
     state["consensus_clusters"]: list[dict]   (output del reconciler)
     state["rob_assessments"]:    list[dict]   (output del rob_assessor)
     state["extractions"]:        list[dict]   (para study_design y sample.n)
+    state["question"]:           str          (para autodetect de idioma)
+    state["output_language"]:    str          (opcional; English/Spanish/auto)
 
 Writes:
     state["consensus_clusters"]: list[dict]   (REEMPLAZA — escritura atómica)
@@ -23,6 +25,10 @@ Writes:
 Si la evaluación de un cluster falla (timeout, parse error), el cluster
 original se conserva con grade_final_certainty = "not_assessed" en vez de
 perderlo — el writer downstream maneja ese estado.
+
+Las prosa fields (`rationale` de downgrades/upgrades y `grade_summary`)
+salen en `output_language` (English o Spanish). Los enums de factor,
+severity y certainty NO se traducen — son parte del contrato.
 """
 
 import asyncio
@@ -35,6 +41,7 @@ from axiom_backend.state import AxiomState
 from axiom_backend.config import settings
 from axiom_backend.tools.llm_router import LLM_32B, extract_json_from_response, featherless_credit, COST_32B
 from axiom_backend.prompts import GRADE_PROFILER_PROMPT
+from axiom_backend.utils.language import resolve_output_language
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +52,14 @@ logger = logging.getLogger(__name__)
 MAX_CONCURRENT_CLUSTERS = 2
 TIMEOUT_S = settings.cochrane_grade_timeout_s
 
+
+# ─── Lenguaje de salida ─────────────────────────────────────────────
+# El prompt grade_profiler_prompt.md contiene placeholders {output_language}
+# en su sección "OUTPUT LANGUAGE" y en los rationale/summary del JSON.
+# Los reemplazamos en _grade_cluster antes de la llamada — mismo patrón
+# que rob_assessor.py y writer.py. Los enums (factor, severity, certainty)
+# NO se traducen; eso queda explícito en el prompt y reforzado por los
+# Pydantic Field patterns.
 
 
 # --- Esquemas (espejo de grade_profiler_prompt.txt § Output Format) ---
@@ -75,41 +90,39 @@ class GradeOutput(BaseModel):
 
 # --- Niveles GRADE como índices para el check aritmético ---
 # Orden: 0=Very Low, 1=Low, 2=Moderate, 3=High. Permite sumar/restar pasos.
-_CERTAINTY_INDEX = {"Very Low": 0, "Low": 1, "Moderate": 2, "High": 3}
+_GRADE_LEVELS = ["Very Low", "Low", "Moderate", "High"]
+_LEVEL_INDEX = {lvl: i for i, lvl in enumerate(_GRADE_LEVELS)}
 
 
 def _validate_grade_arithmetic(grade: GradeOutput) -> None:
-    """Verifica que final_certainty sea consistente con downgrades/upgrades.
+    """Verifica que final_certainty sea aritméticamente derivable de
+    starting_certainty - sum(downgrade_steps) + sum(upgrade_steps).
 
-    Aritmética:
-        net_steps = sum(severity_value) − len(upgrades)
-        expected_idx = clamp(starting_idx − net_steps, 0, 3)
+    Reglas de pasos:
+      - downgrade severity 'none'         → 0 pasos
+      - downgrade severity 'serious'      → 1 paso abajo
+      - downgrade severity 'very_serious' → 2 pasos abajo
+      - upgrade (cualquier factor)        → 1 paso arriba
+      - resultado clamped a [0, 3] (Very Low ≤ x ≤ High)
 
-    DeepSeek-R1 a veces produce JSON coherente individualmente pero con
-    arithmetic que no cuadra — preferimos rechazar y reintentar a aceptar
-    una salida inconsistente.
+    Lanza ValueError si el cálculo no coincide.
     """
-    severity_map = {"none": 0, "serious": 1, "very_serious": 2}
-    downgrade_steps = sum(severity_map[d.severity] for d in grade.downgrades)
+    start_idx = _LEVEL_INDEX["High"] if grade.starting_certainty == "High" else _LEVEL_INDEX["Low"]
+    delta = 0
+    for d in grade.downgrades:
+        if d.severity == "serious":
+            delta -= 1
+        elif d.severity == "very_serious":
+            delta -= 2
+    delta += len(grade.upgrades)
 
-    # Upgrades solo cuentan si starting_certainty es Low (regla GRADE).
-    upgrade_steps = len(grade.upgrades) if grade.starting_certainty == "Low" else 0
-    if grade.starting_certainty == "High" and len(grade.upgrades) > 0:
+    computed_idx = max(0, min(3, start_idx + delta))
+    computed_level = _GRADE_LEVELS[computed_idx]
+
+    if computed_level != grade.final_certainty:
         raise ValueError(
-            f"upgrades not allowed when starting_certainty=High "
-            f"(got {len(grade.upgrades)} upgrades)"
-        )
-
-    starting_idx = _CERTAINTY_INDEX[grade.starting_certainty]
-    expected_idx = max(0, min(3, starting_idx - downgrade_steps + upgrade_steps))
-    actual_idx = _CERTAINTY_INDEX[grade.final_certainty]
-
-    if expected_idx != actual_idx:
-        expected_label = [k for k, v in _CERTAINTY_INDEX.items() if v == expected_idx][0]
-        raise ValueError(
-            f"final_certainty='{grade.final_certainty}' inconsistent with arithmetic: "
-            f"start={grade.starting_certainty} −{downgrade_steps} +{upgrade_steps} "
-            f"= {expected_label}"
+            f"GRADE arithmetic mismatch: starting={grade.starting_certainty}, "
+            f"delta={delta}, computed={computed_level}, declared={grade.final_certainty}"
         )
 
 
@@ -118,7 +131,7 @@ def _build_cluster_payload(
     rob_by_paper: dict[str, dict],
     extr_by_paper: dict[str, dict],
 ) -> dict:
-    """Construye el payload compacto que ve el LLM por cluster.
+    """Construye el payload mínimo que el evaluador GRADE necesita.
 
     Le damos al modelo lo MÍNIMO que necesita para juzgar los 5 downgrades
     y eventuales upgrades:
@@ -169,9 +182,17 @@ def _fallback_cluster(cluster: dict, reason: str) -> dict:
     return fallback
 
 
-async def _grade_cluster(cluster: dict, payload: dict, cluster_idx: int) -> dict | None:
+async def _grade_cluster(
+    cluster: dict,
+    payload: dict,
+    cluster_idx: int,
+    output_language: str,
+) -> dict | None:
     """Evalúa GRADE en un cluster. Devuelve cluster enriquecido o None si falla."""
     user_msg = f"CLUSTER FOR GRADE ASSESSMENT:\n{json.dumps(payload, ensure_ascii=False)}"
+
+    # Inyectar idioma en el prompt — mismo patrón que rob_assessor y writer.
+    system_prompt = GRADE_PROFILER_PROMPT.replace("{output_language}", output_language)
 
     try:
         # Cap global de Featherless: 32B cuesta 2 units.
@@ -180,7 +201,7 @@ async def _grade_cluster(cluster: dict, payload: dict, cluster_idx: int) -> dict
                 LLM_32B.chat.completions.create(
                     model=settings.model_32b_name,
                     messages=[
-                        {"role": "system", "content": GRADE_PROFILER_PROMPT},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user",   "content": user_msg},
                     ],
                     temperature=0.2,
@@ -241,9 +262,12 @@ async def run_grade_profiler(state: AxiomState) -> dict:
     rob_by_paper  = {r["paper_id"]: r for r in rob_assessments if r.get("paper_id")}
     extr_by_paper = {e["paper_id"]: e for e in extractions     if e.get("paper_id")}
 
+    # Idioma: igual que rob_assessor y writer — centralizado en utils/language.py.
+    output_language = resolve_output_language(state)
+
     logger.info(
-        "grade_profiler: evaluando %d clusters (concurrent=%d, timeout=%.0fs)...",
-        len(consensus_clusters), MAX_CONCURRENT_CLUSTERS, TIMEOUT_S,
+        "grade_profiler: evaluando %d clusters (concurrent=%d, timeout=%.0fs, lang=%s)...",
+        len(consensus_clusters), MAX_CONCURRENT_CLUSTERS, TIMEOUT_S, output_language,
     )
 
     sem = asyncio.Semaphore(MAX_CONCURRENT_CLUSTERS)
@@ -251,7 +275,7 @@ async def run_grade_profiler(state: AxiomState) -> dict:
     async def _gated(cluster, idx):
         async with sem:
             payload = _build_cluster_payload(cluster, rob_by_paper, extr_by_paper)
-            return await _grade_cluster(cluster, payload, idx)
+            return await _grade_cluster(cluster, payload, idx, output_language)
 
     results = await asyncio.gather(
         *[_gated(c, i) for i, c in enumerate(consensus_clusters)],

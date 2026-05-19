@@ -1,0 +1,20 @@
+# Axiom frontend — Streamlit configuration
+# ─────────────────────────────────────────────
+# enableStaticServing permite servir archivos del directorio
+# axiom_frontend/static/ como URLs accesibles desde el browser.
+# Sin esto, los gifs de los agentes tienen que embeberse en base64
+# dentro de cada mensaje websocket (≈ 2.4 MB por update), lo cual
+# desincroniza la conexión y dispara "Bad message format".
+[server]
+enableStaticServing = true
+
+# Optimizaciones adicionales para SSE largos:
+# El stream del pipeline puede durar 5-15 minutos. Streamlit por
+# defecto trunca el websocket a un tamaño razonable, pero hacemos
+# el máximo explícito para evitar sorpresas con runs grandes.
+maxMessageSize = 200       # MB (default 200, lo dejamos explícito)
+
+[browser]
+# Sin telemetría — el equipo del hackathon prefiere mantener los runs
+# y el tráfico locales hasta el deploy final.
+gatherUsageStats = false

@@ -54,7 +54,7 @@ DEFAULT_STUDY_DESIGN_INCLUDE = [
 DEFAULT_STUDY_DESIGN_EXCLUDE = ["case report", "editorial"]
 DEFAULT_PUBLICATION_STATUS_ACCEPTED = ["published"]
 
-FRONTEND_VERSION = "1.2"  # bumped for cochrane_mode
+FRONTEND_VERSION = "1.3"  # bumped for output_language
 
 
 # ============================================================================
@@ -86,6 +86,12 @@ class FormData(TypedDict, total=False):
     # Cochrane toggle — when True the backend graph runs rob_assessor and
     # grade_profiler in addition to the standard PRISMA pipeline.
     cochrane_mode: bool
+
+    # Output language for the LLM-generated content (report body, RoB and
+    # GRADE rationales). "auto" (default) → backend autodetect from question.
+    # "English" / "Spanish" → backend uses this verbatim regardless of question.
+    # The UI ES/EN toggle controls ONLY the chrome of the frontend, NOT this.
+    output_language: str
 
 
 # ============================================================================
@@ -329,11 +335,27 @@ def map_form_to_initial_state(form: FormData | dict[str, Any]) -> dict[str, Any]
     # rejects with 422 otherwise.
     cochrane_mode = bool(form.get("cochrane_mode", False))
 
+    # Output language — normalized to backend contract values.
+    # Frontend sends one of "auto" / "English" / "Spanish". Anything else
+    # (typo, future locale) falls back to "auto" so the backend will
+    # autodetect from the question text. The backend's resolve_output_language
+    # treats "auto" exactly the same as missing — they are equivalent here.
+    raw_output_lang = (form.get("output_language") or "auto").strip()
+    if raw_output_lang in ("English", "Spanish", "auto"):
+        output_language = raw_output_lang
+    else:
+        logger.warning(
+            "form_to_state: unknown output_language=%r, falling back to 'auto'",
+            raw_output_lang,
+        )
+        output_language = "auto"
+
     return {
         "sr_id":  uuid.uuid4().hex[:8],
         "domain": (form.get("domain") or "general").strip() or "general",
         "question": question or "(no question provided)",
         "cochrane_mode": cochrane_mode,
+        "output_language": output_language,
         "prisma_criteria": {
             "framework":      "PICOS",
             "prisma_version": "2020",

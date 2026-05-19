@@ -97,6 +97,22 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
                                   "en": ("Enables per-study Risk of Bias 2.0 assessment and per-cluster GRADE "
                                          "certainty rating. Adds roughly 5–10 minutes to the run; uses the "
                                          "reasoning model (DeepSeek-R1).")},
+    "config.label.report_language": {"es": "Idioma del reporte",
+                                     "en": "Report language"},
+    "config.help.report_language":  {
+        "es": ("Idioma en el que se generará el reporte final (resumen, discusión, "
+               "limitaciones, justificaciones de RoB y GRADE). NO controla la interfaz; "
+               "el toggle ES/EN del header sigue siendo para los botones y etiquetas. "
+               "Con 'Auto' el backend lo detecta a partir de la pregunta."),
+        "en": ("Language for the generated report (summary, discussion, limitations, "
+               "RoB and GRADE rationales). Does NOT control the UI; the ES/EN toggle "
+               "in the header continues to control labels and buttons. With 'Auto' the "
+               "backend detects it from the question text."),
+    },
+    "config.report_lang.auto":    {"es": "Auto (según la pregunta)",
+                                   "en": "Auto (from the question)"},
+    "config.report_lang.en":      {"es": "Inglés", "en": "English"},
+    "config.report_lang.es":      {"es": "Español", "en": "Spanish"},
     "config.sources_strip":      {"es": "Fuentes · arXiv · PubMed · OpenAlex · Scielo · Crossref",
                                   "en": "Sources · arXiv · PubMed · OpenAlex · Scielo · Crossref"},
     "config.cta.start":          {"es": "▶ Iniciar revisión sistemática",
@@ -309,6 +325,57 @@ TRANSLATIONS: dict[str, dict[str, str]] = {
                                   "en": "Run started · id={run_id}…"},
     "log.pipeline.cancelled":    {"es": "Pipeline cancelado por el usuario.",
                                   "en": "Pipeline cancelled by user."},
+
+    # ─── Per-agent status milestones (shown under each agent row) ─
+    # Single-line ticker that replaces the old free-form log readout.
+    # Three states per agent: waiting / active / done.
+    "status.waiting":            {"es": "Esperando turno…", "en": "Waiting…"},
+    "status.cancelled":          {"es": "Cancelado", "en": "Cancelled"},
+    # searcher
+    "status.searcher.active":    {"es": "Buscando en APIs académicas…",
+                                  "en": "Searching academic APIs…"},
+    "status.searcher.done":      {"es": "Encontrados {n} papers",
+                                  "en": "Found {n} papers"},
+    # screener
+    "status.screener.active":    {"es": "Filtrando con cascada PRISMA…",
+                                  "en": "Filtering with PRISMA cascade…"},
+    "status.screener.done":      {"es": "Incluidos {included} · excluidos {excluded}",
+                                  "en": "Included {included} · excluded {excluded}"},
+    # extractor
+    "status.extractor.active":   {"es": "Extrayendo datos de PDFs…",
+                                  "en": "Extracting data from PDFs…"},
+    "status.extractor.done":     {"es": "Extraídos {n} papers",
+                                  "en": "Extracted {n} papers"},
+    # rob_assessor (Cochrane)
+    "status.rob.active":         {"es": "Evaluando Risk of Bias 2.0…",
+                                  "en": "Assessing Risk of Bias 2.0…"},
+    "status.rob.done":           {"es": "{n} evaluaciones completadas",
+                                  "en": "{n} assessments completed"},
+    # analyst_7b
+    "status.analyst7b.active":   {"es": "Sintetizando con Qwen 2.5-7B…",
+                                  "en": "Synthesizing with Qwen 2.5-7B…"},
+    "status.analyst7b.done":     {"es": "{n} clusters sintetizados",
+                                  "en": "{n} clusters synthesized"},
+    # analyst_32b
+    "status.analyst32b.active":  {"es": "Razonando con DeepSeek-R1…",
+                                  "en": "Reasoning with DeepSeek-R1…"},
+    "status.analyst32b.done":    {"es": "{n} clusters analizados en profundidad",
+                                  "en": "{n} clusters deeply analyzed"},
+    # grade_profiler (Cochrane)
+    "status.grade.active":       {"es": "Calificando certeza GRADE…",
+                                  "en": "Grading GRADE certainty…"},
+    "status.grade.done":         {"es": "{ok}/{total} clusters calificados",
+                                  "en": "{ok}/{total} clusters graded"},
+    # gapfinder
+    "status.gapfinder.active":   {"es": "Identificando vacíos de evidencia…",
+                                  "en": "Identifying evidence gaps…"},
+    "status.gapfinder.done":     {"es": "{n} vacíos confirmados",
+                                  "en": "{n} confirmed gaps"},
+    # writer
+    "status.writer.active":      {"es": "Redactando reporte con Kimi-K2…",
+                                  "en": "Drafting report with Kimi-K2…"},
+    "status.writer.done":        {"es": "Reporte ensamblado",
+                                  "en": "Report assembled"},
 }
 
 

@@ -128,6 +128,23 @@ def render_screen_config() -> None:
         help=t("config.help.cochrane"),
     )
 
+    # Idioma del reporte. Auto (default) → el backend autodetecta del texto
+    # de la pregunta. English/Spanish → fuerza ese idioma. NO confundir con
+    # el toggle ES/EN del header, que solo afecta los labels de la UI.
+    # El mapping interno (display label → valor del contrato backend) se hace
+    # en el handler del CTA más abajo.
+    report_language_display = st.selectbox(
+        t("config.label.report_language"),
+        options=[
+            t("config.report_lang.auto"),
+            t("config.report_lang.en"),
+            t("config.report_lang.es"),
+        ],
+        index=0,
+        key="report_language",
+        help=t("config.help.report_language"),
+    )
+
     # Sources strip
     st.markdown(
         f'<div style="margin-top:12px; font-family:Space Mono,monospace; '
@@ -166,6 +183,18 @@ def render_screen_config() -> None:
         if lang_es: languages.append("Spanish")
         if lang_pt: languages.append("Portuguese")
 
+        # Mapping display label (localizado) → valor del contrato backend.
+        # Hacemos lookup por igualdad de t() porque las opciones se construyeron
+        # con los mismos t() arriba; si el usuario cambia el idioma del UI
+        # entre que selecciona y aprieta CTA, el lookup seguiría siendo
+        # consistente porque ambos lados usan t() con el mismo key vigente.
+        _LANG_DISPLAY_TO_BACKEND = {
+            t("config.report_lang.auto"): "auto",
+            t("config.report_lang.en"):   "English",
+            t("config.report_lang.es"):   "Spanish",
+        }
+        output_language = _LANG_DISPLAY_TO_BACKEND.get(report_language_display, "auto")
+
         def _split_csv(s: str) -> list[str]:
             return [x.strip() for x in (s or "").replace(";", ",").split(",") if x.strip()]
 
@@ -180,6 +209,7 @@ def render_screen_config() -> None:
             "year_max": int(year_to),
             "languages": languages,
             "cochrane_mode": bool(cochrane_mode),
+            "output_language": output_language,
         }
 
         st.session_state.config        = form
